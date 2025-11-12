@@ -1,0 +1,211 @@
+name: "Android Kotlin (Jetpack Compose) Reusable CI"
+
+on:
+  workflow_call:
+    inputs:
+      java_version:
+        required: true
+        type: string
+      build_variant:
+        required: true
+        type: string
+      coverage_threshold:
+        required: true
+        type: string
+    secrets:
+      SONAR_TOKEN:
+        required: false
+      CODACY_PROJECT_TOKEN:
+        required: false
+
+env:
+  JAVA_VERSION: ${{ inputs.java_version }}
+  BUILD_VARIANT: ${{ inputs.build_variant }}
+  COVERAGE_THRESHOLD: ${{ inputs.coverage_threshold }}
+
+jobs:
+  setup:
+    name: Setup Environment
+    runs-on: ubuntu-latest
+    # Optional container for consistent builds (uses your infra/docker/android-builder.Dockerfile)
+    # container:
+    #   image: ghcr.io/rite-technologies-23/android-builder:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ inputs.java_version }}
+          cache: gradle
+
+      - name: Validate Gradle Wrapper
+        run: ./gradlew wrapper --gradle-version 8.7
+
+      - name: Cache Gradle Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+
+  detekt:
+    name: Run Static Analysis (Detekt)
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ inputs.java_version }}
+          cache: gradle
+
+      - name: Run Detekt
+        run: |
+          if [ -f detekt.yml ]; then
+            echo "✅ Using project detekt.yml"
+            ./gradlew detekt
+          else
+            echo "⚙️ Using default rules from reusable repo"
+            ./gradlew detekt --config tool/detekt.yml || true
+          fi
+
+      - name: Upload Detekt Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Detekt-Report
+          path: app/build/reports/detekt/
+
+  unit_tests:
+    name: Run Unit Tests & Kover Coverage
+    runs-on: ubuntu-latest
+    needs: setup
+    outputs:
+      report-path: app/build/reports/tests/test${{ inputs.build_variant }}UnitTest/index.html
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ inputs.java_version }}
+          cache: gradle
+
+      - name: Run Unit Tests with Kover Coverage
+        run: ./gradlew test${{ inputs.build_variant }}UnitTest koverHtmlReport koverXmlReport || true
+
+      - name: Upload Test & Coverage Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: UnitTest-and-Coverage-Reports
+          path: |
+            app/build/reports/tests/test${{ inputs.build_variant }}UnitTest/
+            app/build/reports/kover/html/
+            app/build/reports/kover/xml/
+
+  coverage_check:
+    name: Verify Coverage Threshold (Kover)
+    runs-on: ubuntu-latest
+    needs: unit_tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Parser Tools
+        run: sudo apt-get update && sudo apt-get install -y jq bc
+
+      - name: Check Coverage Threshold
+        run: |
+          COVERAGE_FILE="app/build/reports/kover/html/index.html"
+          if [ ! -f "$COVERAGE_FILE" ]; then
+            echo "❌ Coverage report not found!"
+            exit 1
+          fi
+
+          TOTAL_COVERAGE=$(grep -oP 'Total.*?([0-9]+\.[0-9]+)(?=%)' "$COVERAGE_FILE" | head -1)
+          echo "📊 Total Coverage: $TOTAL_COVERAGE%"
+
+          result=$(echo "$TOTAL_COVERAGE < $COVERAGE_THRESHOLD" | bc -l)
+          if [ "$result" -eq 1 ]; then
+            echo "❌ Code coverage ($TOTAL_COVERAGE%) is below threshold ($COVERAGE_THRESHOLD%)."
+            exit 1
+          else
+            echo "✅ Coverage check passed ($TOTAL_COVERAGE% ≥ $COVERAGE_THRESHOLD%)."
+          fi
+
+  sonar_analysis:
+    name: SonarCloud Analysis (Optional)
+    runs-on: ubuntu-latest
+    needs: unit_tests
+    if: ${{ secrets.SONAR_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ inputs.java_version }}
+          cache: gradle
+
+      - name: Run Sonar Analysis
+        run: |
+          if [ -f sonar-project.properties ]; then
+            echo "✅ Using local sonar-project.properties"
+          else
+            echo "⚙️ Using default sonar-project.properties from reusable repo"
+            cp tool/sonar-project.properties sonar-project.properties
+          fi
+
+          ./gradlew sonar \
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }} \
+            -Dsonar.host.url=https://sonarcloud.io
+
+  build_apk:
+    name: Build Android APK (Compose App)
+    runs-on: ubuntu-latest
+    needs: [detekt, unit_tests, coverage_check]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ inputs.java_version }}
+          cache: gradle
+
+      - name: Build APK
+        run: ./gradlew assemble${{ inputs.build_variant }}
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-apk
+          path: app/build/outputs/apk/${{ inputs.build_variant }}/
+
+  summary:
+    name: Generate CI Summary
+    runs-on: ubuntu-latest
+    needs: [build_apk, detekt, coverage_check, unit_tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate Markdown Summary
+        run: |
+          chmod +x tool/scripts/*.sh || true
+          COV=$(./tool/scripts/parse_coverage.sh --html app/build/reports/kover/html/index.html --xml app/build/reports/kover/xml/report.xml || true)
+          LINT=$(./tool/scripts/lint_summary.sh app/build/reports/detekt || true)
+          JUNIT=$(./tool/scripts/junit_summary.sh app/build/test-results || true)
+          COVERAGE_TXT="$COV" LINT_TXT="$LINT" JUNIT_TXT="$JUNIT" ./tool/scripts/generate_summary_md.sh
+
+      - name: Upload Job Summary as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-summary
+          path: ${{ github.workspace }}/job-summary.md

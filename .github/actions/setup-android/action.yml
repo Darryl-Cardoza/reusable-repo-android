@@ -1,0 +1,13 @@
+name: "Setup Android Environment"
+description: "Installs and configures Android SDK, platform tools, and verifies environment setup."
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Android SDK
+      shell: bash
+      run: bash $GITHUB_ACTION_PATH/install_sdk.sh
+
+    - name: Verify Environment
+      shell: bash
+      run: bash $GITHUB_ACTION_PATH/verify_env.sh
