@@ -23,20 +23,49 @@ env:
   BUILD_VARIANT: ${{ inputs.build_variant }}
   COVERAGE_THRESHOLD: ${{ inputs.coverage_threshold }}
 
+# -------------------------------------------------------------------
+# 🔁 Global defaults
+# -------------------------------------------------------------------
 defaults:
   run:
     shell: bash
     working-directory: ./
 
+# -------------------------------------------------------------------
+# ⚙️ Shared Setup Block (used by all jobs)
+# -------------------------------------------------------------------
+x-common-setup: &common-setup
+  - uses: actions/checkout@v4
+
+  - name: Ensure Gradlew is executable
+    run: chmod +x gradlew || true
+
+  - name: Set up JDK
+    uses: actions/setup-java@v4
+    with:
+      distribution: 'temurin'
+      java-version: ${{ inputs.java_version }}
+      cache: gradle
+
+  - name: Ensure Gradle Wrapper Exists
+    run: |
+      if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+        echo "⚙️ gradle-wrapper.jar not found — generating wrapper..."
+        gradle wrapper --gradle-version 8.7
+        chmod +x gradlew
+      else
+        echo "✅ Gradle wrapper found."
+      fi
+
+# -------------------------------------------------------------------
+# 🧱 Jobs
+# -------------------------------------------------------------------
 jobs:
   setup:
     name: Setup Environment
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Android Environment
-        uses: ./.github/actions/setup-android
-        with:
-          java_version: ${{ inputs.java_version }}
+      - <<: *common-setup
 
       - name: Cache Gradle Dependencies
         uses: actions/cache@v4
@@ -51,10 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: setup
     steps:
-      - name: Setup Android Environment
-        uses: ./.github/actions/setup-android
-        with:
-          java_version: ${{ inputs.java_version }}
+      - <<: *common-setup
 
       - name: Run Detekt
         run: |
@@ -79,10 +105,7 @@ jobs:
     outputs:
       report-path: app/build/reports/tests/test${{ inputs.build_variant }}UnitTest/index.html
     steps:
-      - name: Setup Android Environment
-        uses: ./.github/actions/setup-android
-        with:
-          java_version: ${{ inputs.java_version }}
+      - <<: *common-setup
 
       - name: Run Unit Tests with Kover Coverage
         run: ./gradlew test${{ inputs.build_variant }}UnitTest koverHtmlReport koverXmlReport || true
@@ -101,10 +124,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: unit_tests
     steps:
-      - name: Setup Android Environment
-        uses: ./.github/actions/setup-android
-        with:
-          java_version: ${{ inputs.java_version }}
+      - <<: *common-setup
 
       - name: Install Parser Tools
         run: sudo apt-get update && sudo apt-get install -y jq bc
@@ -133,10 +153,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: unit_tests
     steps:
-      - name: Setup Android Environment
-        uses: ./.github/actions/setup-android
-        with:
-          java_version: ${{ inputs.java_version }}
+      - <<: *common-setup
 
       - name: Run Sonar Analysis (if token provided)
         env:
@@ -163,10 +180,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [detekt, unit_tests, coverage_check]
     steps:
-      - name: Setup Android Environment
-        uses: ./.github/actions/setup-android
-        with:
-          java_version: ${{ inputs.java_version }}
+      - <<: *common-setup
 
       - name: Build APK
         run: ./gradlew assemble${{ inputs.build_variant }}
@@ -182,10 +196,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build_apk, detekt, coverage_check, unit_tests]
     steps:
-      - name: Setup Android Environment
-        uses: ./.github/actions/setup-android
-        with:
-          java_version: ${{ inputs.java_version }}
+      - <<: *common-setup
 
       - name: Generate Markdown Summary
         run: |
