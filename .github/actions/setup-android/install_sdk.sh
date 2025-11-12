@@ -1,30 +1,27 @@
 #!/usr/bin/env bash
 set -e
 
-echo "📦 Installing Android SDK and build tools..."
+echo "⚙️ Installing Android SDK and required components..."
 
-# Create SDK directory
-sudo mkdir -p /usr/local/android-sdk
-cd /usr/local/android-sdk
+ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$HOME/android-sdk}"
+mkdir -p "$ANDROID_SDK_ROOT"
+echo "✅ Created SDK directory at: $ANDROID_SDK_ROOT"
 
-# Download command line tools
-wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O cmdline-tools.zip
+# Download command-line tools if not preinstalled
+if [ ! -d "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" ]; then
+  echo "📦 Downloading Android command-line tools..."
+  mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+  cd "$ANDROID_SDK_ROOT/cmdline-tools"
+  curl -sSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o cmdline-tools.zip
+  unzip -q cmdline-tools.zip
+  mv cmdline-tools latest
+  rm cmdline-tools.zip
+fi
 
-# Extract and organize
-sudo unzip -q cmdline-tools.zip -d cmdline-tools
-sudo mkdir -p cmdline-tools/latest
-sudo mv cmdline-tools/cmdline-tools/* cmdline-tools/latest/
+export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
 
-# Set environment variables
-echo "ANDROID_HOME=/usr/local/android-sdk" | sudo tee -a /etc/environment
-echo "PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools" | sudo tee -a /etc/environment
-source /etc/environment
+echo "📦 Installing required Android packages..."
+yes | sdkmanager --licenses > /dev/null
+sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
-# Accept licenses and install SDK packages
-yes | sudo cmdline-tools/latest/bin/sdkmanager --sdk_root=/usr/local/android-sdk --licenses
-sudo cmdline-tools/latest/bin/sdkmanager --sdk_root=/usr/local/android-sdk \
-  "platform-tools" \
-  "platforms;android-34" \
-  "build-tools;34.0.0"
-
-echo "✅ Android SDK installed successfully!"
+echo "✅ Android SDK installation complete."
