@@ -57,4 +57,34 @@ WRAPPER_PROPS="$GRADLE_DIR/gradle-wrapper.properties"
 
 mkdir -p "$GRADLE_DIR"
 
-echo "⚙️ Forcin
+echo "⚙️ Forcing Gradle wrapper to version 8.7..."
+
+# ✅ Use single backslashes (not double) inside heredoc
+cat > "$WRAPPER_PROPS" <<'EOF'
+distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-bin.zip
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
+EOF
+
+# ✅ Download wrapper JAR if not present
+if [ ! -f "$WRAPPER_JAR" ]; then
+  echo "📦 Downloading Gradle 8.7 wrapper JAR..."
+  curl -sSL https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar -o "$WRAPPER_JAR"
+fi
+
+# ✅ Create gradlew if missing
+if [ ! -f "gradlew" ]; then
+  echo "📝 Creating gradlew script..."
+  cat > gradlew <<'EOGRADLE'
+#!/usr/bin/env bash
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+JAVA_CMD="${JAVA_HOME:-/usr}/bin/java"
+exec "$JAVA_CMD" -jar "$DIR/gradle/wrapper/gradle-wrapper.jar" "$@"
+EOGRADLE
+  chmod +x gradlew
+fi
+
+echo "✅ Gradle wrapper pinned to version 8.7."
+echo "✅ Android SDK installation complete and PATH exported."
