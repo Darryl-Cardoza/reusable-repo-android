@@ -1,0 +1,99 @@
+name: "Android CD (Release) - Reusable"
+
+on:
+  workflow_call:
+    inputs:
+      java_version:
+        required: true
+        type: string
+      build_variant:
+        required: true
+        type: string
+      coverage_threshold:
+        required: true
+        type: string
+      create_release:
+        required: false
+        type: boolean
+        default: true
+      artifact_name:
+        required: false
+        type: string
+        default: ""
+    outputs:
+      coverage_percent:
+        description: "Computed JaCoCo LINE coverage percent from CI"
+        value: ${{ jobs.ci.outputs.coverage_percent }}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    name: Run CI (Reusable)
+    uses: ./.github/workflows/android-ci.yml
+    with:
+      java_version: ${{ inputs.java_version }}
+      build_variant: ${{ inputs.build_variant }}
+      coverage_threshold: ${{ inputs.coverage_threshold }}
+
+  release:
+    name: Create GitHub Release + Upload Artifacts
+    needs: ci
+    runs-on: ubuntu-latest
+    if: ${{ inputs.create_release }}
+
+    steps:
+      - name: Checkout (optional)
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name != '' && inputs.artifact_name || format('android-build-outputs-{0}', inputs.build_variant) }}
+          path: dist
+
+      - name: List downloaded files
+        run: |
+          echo "Downloaded artifact structure:"
+          ls -la dist || true
+          find dist -type f -maxdepth 6 || true
+
+      - name: Set release tag & name
+        id: relmeta
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="manual-$(date +%Y%m%d-%H%M%S)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "name=Android Release $TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.relmeta.outputs.tag }}" \
+            --title "${{ steps.relmeta.outputs.name }}" \
+            --notes "Automated release. CI coverage: ${{ needs.ci.outputs.coverage_percent }}%"
+
+      - name: Upload APK/AAB files to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          FILES=$(find dist -type f \( -name "*.apk" -o -name "*.aab" \) || true)
+          if [ -z "$FILES" ]; then
+            echo "❌ No .apk/.aab files found in dist to upload."
+            exit 1
+          fi
+
+          echo "Uploading files:"
+          echo "$FILES"
+
+          # shellcheck disable=SC2086
+          gh release upload "${{ steps.relmeta.outputs.tag }}" $FILES --clobber
