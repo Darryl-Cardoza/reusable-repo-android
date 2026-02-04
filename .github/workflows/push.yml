@@ -122,10 +122,11 @@ jobs:
             ls -R app/build/reports/jacoco || true
             exit 1
           fi
-
-          MISSED=$(grep -oP '<counter type="LINE" missed="\K[0-9]+' "$XML" | head -1 || true)
-          COVERED=$(grep -oP '<counter type="LINE" missed="[0-9]+" covered="\K[0-9]+' "$XML" | head -1 || true)
-
+          
+          LINE_COUNTER=$(grep -oP '<counter type="LINE" missed="[0-9]+" covered="[0-9]+"\s*/>' "$XML" | tail -1)
+          MISSED=$(echo "$LINE_COUNTER" | grep -oP 'missed="\K[0-9]+')
+          COVERED=$(echo "$LINE_COUNTER" | grep -oP 'covered="\K[0-9]+')
+  
           if [ -z "${MISSED:-}" ] || [ -z "${COVERED:-}" ]; then
             echo "❌ Could not parse LINE counters from JaCoCo XML."
             grep -n 'counter type="LINE"' "$XML" | head -5 || true
