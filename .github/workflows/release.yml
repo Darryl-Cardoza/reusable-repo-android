@@ -35,7 +35,7 @@ concurrency:
 jobs:
   ci:
     name: Run CI (Reusable)
-    uses: ./.github/workflows/android-ci.yml
+    uses: ./.github/workflows/push.yml
     with:
       java_version: ${{ inputs.java_version }}
       build_variant: ${{ inputs.build_variant }}
