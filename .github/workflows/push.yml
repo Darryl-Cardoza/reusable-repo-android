@@ -89,7 +89,9 @@ jobs:
           if ./gradlew :app:tasks --all | grep -qE '(^|[[:space:]])jacocoTestReport\b'; then
             echo "✅ Found :app:jacocoTestReport"
             echo "▶️ Running: ./gradlew :app:jacocoTestReport"
-            ./gradlew :app:jacocoTestReport -PcoverageVariant=${BUILD_VARIANT}
+            ./gradlew clean :app:test${BUILD_VARIANT}UnitTest :app:jacocoTestReport \
+          -PcoverageVariant=${BUILD_VARIANT} --rerun-tasks --no-build-cache
+            
             echo "✅ JaCoCo report generated."
           else
             echo "❌ :app:jacocoTestReport NOT found."
