@@ -79,20 +79,23 @@ jobs:
       - name: "📈 JaCoCo: Generate report"
         run: |
           set -euo pipefail
-
+          
           echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "📈 JaCoCo Report Generation"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-          if ./gradlew tasks --all | grep -qE '^jacocoTestReport\b'; then
-            echo "✅ JaCoCo task found: jacocoTestReport"
-            echo "▶️ Running: ./gradlew jacocoTestReport"
-            ./gradlew jacocoTestReport
+          
+          echo "🔎 Searching for jacocoTestReport in :app tasks..."
+          if ./gradlew :app:tasks --all | grep -qE '(^|[[:space:]])jacocoTestReport\b'; then
+            echo "✅ Found :app:jacocoTestReport"
+            echo "▶️ Running: ./gradlew :app:jacocoTestReport"
+            ./gradlew :app:jacocoTestReport -PcoverageVariant=${BUILD_VARIANT}
             echo "✅ JaCoCo report generated."
           else
-            echo "⚠️ JaCoCo task NOT found (jacocoTestReport)."
-            echo "ℹ️ Skipping report generation."
+            echo "❌ :app:jacocoTestReport NOT found."
+            echo "📌 Available JaCoCo tasks:"
+            ./gradlew :app:tasks --all | grep -i jacoco || true
+            exit 1
           fi
 
       - name: "✅ Coverage Gate (JaCoCo XML)"
@@ -110,21 +113,16 @@ jobs:
           echo "🎯 Threshold: ${COVERAGE_THRESHOLD}%"
           echo ""
 
-          if ! ./gradlew tasks --all | grep -qE '^jacocoTestReport\b'; then
-            echo "⚠️ JaCoCo task NOT found, coverage gate skipped."
-            echo "coverage_percent=0.00" >> "$GITHUB_OUTPUT"
-            exit 0
+          if ! ./gradlew :app:tasks --all | grep -qE '(^|[[:space:]])jacocoTestReport\b'; then
+            echo "❌ :app:jacocoTestReport not found; cannot compute coverage."
+            echo "📌 Available JaCoCo tasks:"
+            ./gradlew :app:tasks --all | grep -i jacoco || true
+            exit 1
           fi
 
           if [ ! -f "$XML" ]; then
-            echo "❌ JaCoCo XML not found."
-            echo ""
-            echo "🛠️ Troubleshooting:"
-            echo "  • Ensure jacocoTestReport generates XML output"
-            echo "  • Verify your Gradle task writes to this path"
-            echo "  • Try printing the report folder:"
-            echo "      ls -R app/build/reports/jacoco || true"
-            echo ""
+            echo "❌ JaCoCo XML not found at: $XML"
+            echo "📌 Listing jacoco report folder:"
             ls -R app/build/reports/jacoco || true
             exit 1
           fi
@@ -134,47 +132,98 @@ jobs:
 
           if [ -z "${MISSED:-}" ] || [ -z "${COVERED:-}" ]; then
             echo "❌ Could not parse LINE counters from JaCoCo XML."
-            echo "🔎 Showing the first LINE counter found (if any):"
             grep -n 'counter type="LINE"' "$XML" | head -5 || true
             exit 1
           fi
 
           TOTAL=$((MISSED + COVERED))
-          if [ "$TOTAL" -eq 0 ]; then
-            echo "❌ LINE total is 0; cannot compute coverage."
-            exit 1
-          fi
-
           PCT=$(awk -v c="$COVERED" -v t="$TOTAL" 'BEGIN { printf "%.2f", (c/t)*100 }')
 
-          echo "📊 Results"
-          echo "  • Covered lines : $COVERED"
-          echo "  • Missed lines  : $MISSED"
-          echo "  • Total lines   : $TOTAL"
-          echo "  • Coverage      : ${PCT}%"
-          echo ""
-
           echo "coverage_percent=$PCT" >> "$GITHUB_OUTPUT"
+          echo "📊 LINE Coverage: ${PCT}%"
 
           PASS=$(awk -v p="$PCT" -v th="$COVERAGE_THRESHOLD" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
-
           if [ "$PASS" -ne 1 ]; then
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "❌ Coverage Gate FAILED"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "Coverage ${PCT}% is below threshold ${COVERAGE_THRESHOLD}%"
-            echo ""
-            echo "✅ Next steps:"
-            echo "  • Add/extend unit tests for uncovered code"
-            echo "  • Re-run: ./gradlew test${BUILD_VARIANT}UnitTest jacocoTestReport"
-            echo "  • Open HTML report: app/build/reports/jacoco/jacocoTestReport/html/index.html"
+            echo "❌ Coverage ${PCT}% is below threshold ${COVERAGE_THRESHOLD}%"
             exit 1
           fi
 
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "✅ Coverage Gate PASSED"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "Coverage ${PCT}% ≥ threshold ${COVERAGE_THRESHOLD}%"
+          echo "✅ Coverage gate passed (${PCT}% >= ${COVERAGE_THRESHOLD}%)"
+
+      - name: "🧾 Coverage Summary (UI Friendly)"
+        if: always()
+        run: |
+          set -euo pipefail
+          
+          XML="app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml"
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+          
+          echo "## 📊 JaCoCo Coverage Report" >> "$SUMMARY"
+          echo "" >> "$SUMMARY"
+          
+          if [ ! -f "$XML" ]; then
+            echo "❌ **JaCoCo XML not found** at \`$XML\`" >> "$SUMMARY"
+            echo "" >> "$SUMMARY"
+            echo "### 🛠️ Troubleshooting" >> "$SUMMARY"
+            echo "- Ensure \`jacocoTestReport\` generates XML output" >> "$SUMMARY"
+            echo "- Verify the XML path in the workflow matches your Gradle setup" >> "$SUMMARY"
+            exit 0
+          fi
+          
+          # TOTAL LINE coverage (first LINE counter is total in jacoco XML)
+          MISSED=$(grep -oP '<counter type="LINE" missed="\K[0-9]+' "$XML" | head -1)
+          COVERED=$(grep -oP '<counter type="LINE" missed="[0-9]+" covered="\K[0-9]+' "$XML" | head -1)
+          TOTAL=$((MISSED + COVERED))
+          PCT=$(awk -v c="$COVERED" -v t="$TOTAL" 'BEGIN { printf "%.2f", (c/t)*100 }')
+          
+          TH="${COVERAGE_THRESHOLD:-0}"
+          PASS=$(awk -v p="$PCT" -v th="$TH" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
+          
+          if [ "$PASS" -eq 1 ]; then
+            echo "✅ **Status:** PASSED  (Coverage **${PCT}%** ≥ Threshold **${TH}%**)" >> "$SUMMARY"
+          else
+            echo "❌ **Status:** FAILED  (Coverage **${PCT}%** < Threshold **${TH}%**)" >> "$SUMMARY"
+          fi
+          
+          echo "" >> "$SUMMARY"
+          echo "### ✅ Overall" >> "$SUMMARY"
+          echo "" >> "$SUMMARY"
+          echo "| Metric | Value |" >> "$SUMMARY"
+          echo "|---|---:|" >> "$SUMMARY"
+          echo "| Covered lines | $COVERED |" >> "$SUMMARY"
+          echo "| Missed lines | $MISSED |" >> "$SUMMARY"
+          echo "| Total lines | $TOTAL |" >> "$SUMMARY"
+          echo "| Line coverage | **${PCT}%** |" >> "$SUMMARY"
+          echo "| Threshold | ${TH}% |" >> "$SUMMARY"
+          echo "" >> "$SUMMARY"
+          
+          echo "### 🔎 Where coverage is missing (Top packages by missed lines)" >> "$SUMMARY"
+          echo "" >> "$SUMMARY"
+          echo "| Package | Covered | Missed | Coverage |" >> "$SUMMARY"
+          echo "|---|---:|---:|---:|" >> "$SUMMARY"
+          
+          # Package-level counters: <package name="..."> ... <counter type="LINE" missed="X" covered="Y"/>
+          # This parses package blocks and prints top 8 by missed lines.
+          awk '
+            BEGIN { pkg=""; missed=0; covered=0; }
+            /<package name="/ {
+              match($0, /<package name="([^"]+)"/, a); pkg=a[1];
+            }
+            /<counter type="LINE"/ && pkg != "" {
+              match($0, /missed="([0-9]+)"/, m); missed=m[1];
+              match($0, /covered="([0-9]+)"/, c); covered=c[1];
+              total=missed+covered;
+              pct=(total>0)?(covered/total*100):0;
+              printf "%s %d %d %.2f\n", pkg, covered, missed, pct;
+              pkg="";
+            }
+          ' "$XML" | sort -k3,3nr | head -8 | while read -r PKG COV MIS P; do
+            echo "| \`$PKG\` | $COV | $MIS | ${P}% |" >> "$SUMMARY"
+          done
+          
+          echo "" >> "$SUMMARY"
+          echo "### 📦 Artifacts" >> "$SUMMARY"
+          echo "- Download **jacoco-reports** artifact to view the full HTML report (\`index.html\`)." >> "$SUMMARY"
 
       - name: Build APK
         run: ./gradlew assemble${{ env.BUILD_VARIANT }}
