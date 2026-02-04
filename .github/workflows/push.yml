@@ -75,6 +75,107 @@ jobs:
       - name: Run Unit Tests
         run: ./gradlew test${{ env.BUILD_VARIANT }}UnitTest
 
+      # Generate JaCoCo report (task name can differ in your project)
+      - name: "📈 JaCoCo: Generate report"
+        run: |
+          set -euo pipefail
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📈 JaCoCo Report Generation"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          if ./gradlew tasks --all | grep -qE '^jacocoTestReport\b'; then
+            echo "✅ JaCoCo task found: jacocoTestReport"
+            echo "▶️ Running: ./gradlew jacocoTestReport"
+            ./gradlew jacocoTestReport
+            echo "✅ JaCoCo report generated."
+          else
+            echo "⚠️ JaCoCo task NOT found (jacocoTestReport)."
+            echo "ℹ️ Skipping report generation."
+          fi
+
+      - name: "✅ Coverage Gate (JaCoCo XML)"
+        id: coverage
+        run: |
+          set -euo pipefail
+
+          XML="app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml"
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✅ Coverage Gate"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📄 Expected XML: $XML"
+          echo "🎯 Threshold: ${COVERAGE_THRESHOLD}%"
+          echo ""
+
+          if ! ./gradlew tasks --all | grep -qE '^jacocoTestReport\b'; then
+            echo "⚠️ JaCoCo task NOT found, coverage gate skipped."
+            echo "coverage_percent=0.00" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ ! -f "$XML" ]; then
+            echo "❌ JaCoCo XML not found."
+            echo ""
+            echo "🛠️ Troubleshooting:"
+            echo "  • Ensure jacocoTestReport generates XML output"
+            echo "  • Verify your Gradle task writes to this path"
+            echo "  • Try printing the report folder:"
+            echo "      ls -R app/build/reports/jacoco || true"
+            echo ""
+            ls -R app/build/reports/jacoco || true
+            exit 1
+          fi
+
+          MISSED=$(grep -oP '<counter type="LINE" missed="\K[0-9]+' "$XML" | head -1 || true)
+          COVERED=$(grep -oP '<counter type="LINE" missed="[0-9]+" covered="\K[0-9]+' "$XML" | head -1 || true)
+
+          if [ -z "${MISSED:-}" ] || [ -z "${COVERED:-}" ]; then
+            echo "❌ Could not parse LINE counters from JaCoCo XML."
+            echo "🔎 Showing the first LINE counter found (if any):"
+            grep -n 'counter type="LINE"' "$XML" | head -5 || true
+            exit 1
+          fi
+
+          TOTAL=$((MISSED + COVERED))
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "❌ LINE total is 0; cannot compute coverage."
+            exit 1
+          fi
+
+          PCT=$(awk -v c="$COVERED" -v t="$TOTAL" 'BEGIN { printf "%.2f", (c/t)*100 }')
+
+          echo "📊 Results"
+          echo "  • Covered lines : $COVERED"
+          echo "  • Missed lines  : $MISSED"
+          echo "  • Total lines   : $TOTAL"
+          echo "  • Coverage      : ${PCT}%"
+          echo ""
+
+          echo "coverage_percent=$PCT" >> "$GITHUB_OUTPUT"
+
+          PASS=$(awk -v p="$PCT" -v th="$COVERAGE_THRESHOLD" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
+
+          if [ "$PASS" -ne 1 ]; then
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "❌ Coverage Gate FAILED"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "Coverage ${PCT}% is below threshold ${COVERAGE_THRESHOLD}%"
+            echo ""
+            echo "✅ Next steps:"
+            echo "  • Add/extend unit tests for uncovered code"
+            echo "  • Re-run: ./gradlew test${BUILD_VARIANT}UnitTest jacocoTestReport"
+            echo "  • Open HTML report: app/build/reports/jacoco/jacocoTestReport/html/index.html"
+            exit 1
+          fi
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✅ Coverage Gate PASSED"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Coverage ${PCT}% ≥ threshold ${COVERAGE_THRESHOLD}%"
+
       - name: Build APK
         run: ./gradlew assemble${{ env.BUILD_VARIANT }}
 
@@ -99,6 +200,13 @@ jobs:
           path: |
             app/build/reports/tests/
             app/build/test-results/
+
+      - name: Upload JaCoCo Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-reports-${{ env.BUILD_VARIANT }}
+          path: app/build/reports/jacoco/
 
       - name: Upload Detekt Reports (if any)
         if: always()
