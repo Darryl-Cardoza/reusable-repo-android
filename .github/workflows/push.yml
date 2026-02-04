@@ -79,19 +79,20 @@ jobs:
       - name: "📈 JaCoCo: Generate report"
         run: |
           set -euo pipefail
-          
+
           echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "📈 JaCoCo Report Generation"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          
+
           echo "🔎 Searching for jacocoTestReport in :app tasks..."
           if ./gradlew :app:tasks --all | grep -qE '(^|[[:space:]])jacocoTestReport\b'; then
             echo "✅ Found :app:jacocoTestReport"
-            echo "▶️ Running: ./gradlew :app:jacocoTestReport"
-            ./gradlew clean :app:test${BUILD_VARIANT}UnitTest :app:jacocoTestReport \
-          -PcoverageVariant=${BUILD_VARIANT} --rerun-tasks --no-build-cache
-            
+            echo "▶️ Running tests + report (forced, no cache)"
+
+            ./gradlew clean ":app:test${BUILD_VARIANT}UnitTest" :app:jacocoTestReport \
+              "-PcoverageVariant=${BUILD_VARIANT}" --rerun-tasks --no-build-cache
+
             echo "✅ JaCoCo report generated."
           else
             echo "❌ :app:jacocoTestReport NOT found."
@@ -115,13 +116,6 @@ jobs:
           echo "🎯 Threshold: ${COVERAGE_THRESHOLD}%"
           echo ""
 
-          if ! ./gradlew :app:tasks --all | grep -qE '(^|[[:space:]])jacocoTestReport\b'; then
-            echo "❌ :app:jacocoTestReport not found; cannot compute coverage."
-            echo "📌 Available JaCoCo tasks:"
-            ./gradlew :app:tasks --all | grep -i jacoco || true
-            exit 1
-          fi
-
           if [ ! -f "$XML" ]; then
             echo "❌ JaCoCo XML not found at: $XML"
             echo "📌 Listing jacoco report folder:"
@@ -139,8 +133,14 @@ jobs:
           fi
 
           TOTAL=$((MISSED + COVERED))
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "❌ LINE total is 0; cannot compute coverage."
+            exit 1
+          fi
+
           PCT=$(awk -v c="$COVERED" -v t="$TOTAL" 'BEGIN { printf "%.2f", (c/t)*100 }')
 
+          echo "DEBUG: covered=$COVERED missed=$MISSED total=$TOTAL pct=$PCT"
           echo "coverage_percent=$PCT" >> "$GITHUB_OUTPUT"
           echo "📊 LINE Coverage: ${PCT}%"
 
