@@ -83,20 +83,25 @@ jobs:
         run: ./gradlew test${{ env.BUILD_VARIANT }}UnitTest
 
       # Generate JaCoCo report (task name can differ in your project)
-      - name: "📈 JaCoCo: Test + Generate report"
+      - name: "📈 JaCoCo Test + Report (via init script)"
         run: |
           set -euo pipefail
+
+          INIT=".reusable/gradle/jacoco.init.gradle"
 
           echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "📈 JaCoCo Test + Report"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Init script: $INIT"
+          test -f "$INIT"
 
-          if ./gradlew :app:tasks --all | grep -qE '(^|[[:space:]])jacocoTestReport\b'; then
+          echo "🔎 Checking jacocoTestReport task (with init script)..."
+          if ./gradlew -I "$INIT" :app:tasks --all | grep -qE '(^|[[:space:]])jacocoTestReport\b'; then
             echo "✅ Found :app:jacocoTestReport"
             echo "▶️ Running: clean + test + jacocoTestReport"
 
-            ./gradlew clean \
+            ./gradlew -I "$INIT" clean \
               ":app:test${BUILD_VARIANT}UnitTest" \
               :app:jacocoTestReport \
               "-PcoverageVariant=${BUILD_VARIANT}" \
@@ -104,8 +109,9 @@ jobs:
 
             echo "✅ Report generated"
           else
-            echo "❌ :app:jacocoTestReport NOT found."
-            ./gradlew :app:tasks --all | grep -i jacoco || true
+            echo "❌ :app:jacocoTestReport NOT found even after init script."
+            echo "📌 JaCoCo-related tasks:"
+            ./gradlew -I "$INIT" :app:tasks --all | grep -i jacoco || true
             exit 1
           fi
 
@@ -113,40 +119,34 @@ jobs:
         id: coverage
         run: |
           set -euo pipefail
-          
+
           XML="app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml"
-          
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "✅ Coverage Gate"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📄 XML: $XML"
+          echo "📄 Expected XML: $XML"
           echo "🎯 Threshold: ${COVERAGE_THRESHOLD}%"
-          echo ""
-          
+
           if [ ! -f "$XML" ]; then
-            echo "❌ JaCoCo XML not found."
+            echo "❌ JaCoCo XML not found at: $XML"
             ls -R app/build/reports/jacoco || true
             exit 1
           fi
-          
-          LINE_COUNTER=$(grep -oP '<counter type="LINE" missed="[0-9]+" covered="[0-9]+"' "$XML" | tail -1)
+
+          LINE_COUNTER=$(grep -oP '<counter type="LINE" missed="[0-9]+" covered="[0-9]+"\s*/>' "$XML" | tail -1)
           MISSED=$(echo "$LINE_COUNTER" | grep -oP 'missed="\K[0-9]+')
           COVERED=$(echo "$LINE_COUNTER" | grep -oP 'covered="\K[0-9]+')
-          
+
           TOTAL=$((MISSED + COVERED))
           PCT=$(awk -v c="$COVERED" -v t="$TOTAL" 'BEGIN { printf "%.2f", (c/t)*100 }')
-          
+
           echo "coverage_percent=$PCT" >> "$GITHUB_OUTPUT"
           echo "📊 LINE Coverage: ${PCT}% (covered=$COVERED missed=$MISSED total=$TOTAL)"
-          
+
           PASS=$(awk -v p="$PCT" -v th="$COVERAGE_THRESHOLD" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
           if [ "$PASS" -ne 1 ]; then
             echo "❌ Coverage ${PCT}% is below threshold ${COVERAGE_THRESHOLD}%"
             exit 1
           fi
-          
-          echo "✅ Coverage gate passed"
+
+          echo "✅ Coverage gate passed (${PCT}% >= ${COVERAGE_THRESHOLD}%)"
 
       - name: "🧾 Coverage Summary (UI Friendly)"
         if: always()
