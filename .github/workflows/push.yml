@@ -83,35 +83,35 @@ jobs:
         run: ./gradlew test${{ env.BUILD_VARIANT }}UnitTest
 
       # Generate JaCoCo report (task name can differ in your project)
-      - name: "📈 JaCoCo Test + Report (via init script)"
+      - name: "📈 JaCoCo: Generate report"
         run: |
           set -euo pipefail
 
-          INIT=".reusable/gradle/jacoco.init.gradle"
+          INIT_SCRIPT=".reusable/gradle/jacoco.init.gradle"
 
           echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📈 JaCoCo Test + Report"
+          echo "📈 JaCoCo Report Generation"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "Init script: $INIT"
-          test -f "$INIT"
+          echo "Using init script: $INIT_SCRIPT"
 
-          echo "🔎 Checking jacocoTestReport task (with init script)..."
-          if ./gradlew -I "$INIT" :app:tasks --all | grep -qE '(^|[[:space:]])jacocoTestReport\b'; then
+          echo "🔎 Searching for jacocoTestReport in :app tasks..."
+          if ./gradlew -I "$INIT_SCRIPT" :app:tasks --all | grep -qE '(^|[[:space:]])jacocoTestReport\b'; then
             echo "✅ Found :app:jacocoTestReport"
-            echo "▶️ Running: clean + test + jacocoTestReport"
+            echo "▶️ Running tests + report (forced, no cache)"
 
-            ./gradlew -I "$INIT" clean \
+            ./gradlew -I "$INIT_SCRIPT" \
+              clean \
               ":app:test${BUILD_VARIANT}UnitTest" \
               :app:jacocoTestReport \
               "-PcoverageVariant=${BUILD_VARIANT}" \
               --rerun-tasks --no-build-cache
 
-            echo "✅ Report generated"
+            echo "✅ JaCoCo report generated."
           else
-            echo "❌ :app:jacocoTestReport NOT found even after init script."
-            echo "📌 JaCoCo-related tasks:"
-            ./gradlew -I "$INIT" :app:tasks --all | grep -i jacoco || true
+            echo "❌ :app:jacocoTestReport NOT found."
+            echo "📌 Available JaCoCo tasks:"
+            ./gradlew -I "$INIT_SCRIPT" :app:tasks --all | grep -i jacoco || true
             exit 1
           fi
 
@@ -121,24 +121,45 @@ jobs:
           set -euo pipefail
 
           XML="app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml"
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✅ Coverage Gate"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "📄 Expected XML: $XML"
           echo "🎯 Threshold: ${COVERAGE_THRESHOLD}%"
+          echo ""
 
           if [ ! -f "$XML" ]; then
             echo "❌ JaCoCo XML not found at: $XML"
+            echo "📌 Listing jacoco report folder:"
             ls -R app/build/reports/jacoco || true
             exit 1
           fi
-
+          
           LINE_COUNTER=$(grep -oP '<counter type="LINE" missed="[0-9]+" covered="[0-9]+"\s*/>' "$XML" | tail -1)
+  
           MISSED=$(echo "$LINE_COUNTER" | grep -oP 'missed="\K[0-9]+')
           COVERED=$(echo "$LINE_COUNTER" | grep -oP 'covered="\K[0-9]+')
+  
+  
+          if [ -z "${MISSED:-}" ] || [ -z "${COVERED:-}" ]; then
+            echo "❌ Could not parse LINE counters from JaCoCo XML."
+            grep -n 'counter type="LINE"' "$XML" | head -5 || true
+            exit 1
+          fi
 
           TOTAL=$((MISSED + COVERED))
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "❌ LINE total is 0; cannot compute coverage."
+            exit 1
+          fi
+
           PCT=$(awk -v c="$COVERED" -v t="$TOTAL" 'BEGIN { printf "%.2f", (c/t)*100 }')
 
+          echo "DEBUG: covered=$COVERED missed=$MISSED total=$TOTAL pct=$PCT"
           echo "coverage_percent=$PCT" >> "$GITHUB_OUTPUT"
-          echo "📊 LINE Coverage: ${PCT}% (covered=$COVERED missed=$MISSED total=$TOTAL)"
+          echo "📊 LINE Coverage: ${PCT}%"
 
           PASS=$(awk -v p="$PCT" -v th="$COVERAGE_THRESHOLD" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
           if [ "$PASS" -ne 1 ]; then
