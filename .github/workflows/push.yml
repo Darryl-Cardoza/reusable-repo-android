@@ -189,17 +189,21 @@ jobs:
             exit 0
           fi
 
-          # ✅ Overall TOTAL = report-level LINE counter (LAST in the XML)
-          LINE_COUNTER=$(grep -oP '<counter type="LINE" missed="[0-9]+" covered="[0-9]+"\s*/>' "$XML" | tail -1 || true)
-          MISSED=$(echo "$LINE_COUNTER" | grep -oP 'missed="\K[0-9]+' || true)
-          COVERED=$(echo "$LINE_COUNTER" | grep -oP 'covered="\K[0-9]+' || true)
+          # ✅ Normalize XML (JaCoCo sometimes writes everything in one line)
+          NXML="$(mktemp)"
+          sed 's/></>\n</g' "$XML" > "$NXML"
+
+          # ✅ Overall TOTAL = report-level LINE counter (LAST LINE counter in file)
+          LINE_COUNTER=$(grep -E '<counter type="LINE" missed="[0-9]+" covered="[0-9]+"' "$NXML" | tail -1 || true)
+          MISSED=$(echo "$LINE_COUNTER" | grep -oE 'missed="[0-9]+"' | grep -oE '[0-9]+' || true)
+          COVERED=$(echo "$LINE_COUNTER" | grep -oE 'covered="[0-9]+"' | grep -oE '[0-9]+' || true)
 
           if [ -z "${MISSED:-}" ] || [ -z "${COVERED:-}" ]; then
             echo "❌ **Could not parse overall LINE counters** from JaCoCo XML." >> "$SUMMARY"
             echo "" >> "$SUMMARY"
             echo "Showing first few LINE counters for debugging:" >> "$SUMMARY"
             echo '```' >> "$SUMMARY"
-            grep -n 'counter type="LINE"' "$XML" | head -10 >> "$SUMMARY" || true
+            grep -n 'counter type="LINE"' "$NXML" | head -10 >> "$SUMMARY" || true
             echo '```' >> "$SUMMARY"
             exit 0
           fi
@@ -228,36 +232,63 @@ jobs:
           echo "| Threshold | ${TH}% |" >> "$SUMMARY"
           echo "" >> "$SUMMARY"
 
-          echo "### 🔎 Where coverage is missing (Top packages by missed lines)" >> "$SUMMARY"
+          echo "### 🔎 Where coverage is missing (Top files by missed lines)" >> "$SUMMARY"
           echo "" >> "$SUMMARY"
-          echo "| Package | Covered | Missed | Coverage |" >> "$SUMMARY"
+          echo "| File | Covered | Missed | Coverage |" >> "$SUMMARY"
           echo "|---|---:|---:|---:|" >> "$SUMMARY"
 
-          # ✅ Package totals: pick the LAST <counter type="LINE"...> before </package>
+          # ✅ File-wise table with package/file
           awk '
-            /<package name="/ {
-              match($0, /<package name="([^"]+)"/, a); pkg=a[1];
-              in_pkg=1; last_line="";
-            }
-            in_pkg && /<counter type="LINE"/ { last_line=$0; }
-            in_pkg && /<\/package>/ {
-              if (last_line != "") {
-                match(last_line, /missed="([0-9]+)"/, m);
-                match(last_line, /covered="([0-9]+)"/, c);
-                missed=m[1]; covered=c[1];
-                total=missed+covered;
-                pct=(total>0)?(covered/total*100):0;
-                printf "%s %d %d %.2f\n", pkg, covered, missed, pct;
+            function flush_file() {
+              if (in_sourcefile && file != "" && missed != "" && covered != "") {
+                total = missed + covered
+                pct = (total>0) ? (covered/total*100) : 0
+                printf "%s/%s %d %d %.2f\n", pkg, file, covered, missed, pct
               }
-              in_pkg=0;
             }
-          ' "$XML" | sort -k3,3nr | head -8 | while read -r PKG COV MIS P; do
-            echo "| \`$PKG\` | $COV | $MIS | ${P}% |" >> "$SUMMARY"
-          done
 
-          echo "" >> "$SUMMARY"
-          echo "### 📦 Artifacts" >> "$SUMMARY"
-          echo "- Download **jacoco-reports** artifact to view the full HTML report (\`index.html\`)." >> "$SUMMARY"
+            /<package name="/ {
+              match($0, /<package name="([^"]+)"/, a)
+              pkg = a[1]
+              next
+            }
+
+            /<sourcefile name="/ {
+              # flush previous file (if any)
+              flush_file()
+
+              match($0, /<sourcefile name="([^"]+)"/, b)
+              file = b[1]
+              missed = ""
+              covered = ""
+              in_sourcefile = 1
+              next
+            }
+
+            in_sourcefile && /<counter type="LINE"/ {
+              match($0, /missed="([0-9]+)"/, m); missed = m[1]
+              match($0, /covered="([0-9]+)"/, c); covered = c[1]
+              next
+            }
+
+            /<\/sourcefile>/ {
+              flush_file()
+              in_sourcefile = 0
+              file = ""
+              missed = ""
+              covered = ""
+              next
+            }
+
+            END {
+              flush_file()
+            }
+          ' "$NXML" \
+          | sort -k3,3nr \
+          | head -10 \
+          | while read -r FILEPATH COV MIS P; do
+              echo "| \`$FILEPATH\` | $COV | $MIS | ${P}% |" >> "$SUMMARY"
+            done
 
       - name: Build APK
         run: ./gradlew assemble${{ env.BUILD_VARIANT }}
