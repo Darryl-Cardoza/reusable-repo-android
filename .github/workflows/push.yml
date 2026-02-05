@@ -43,12 +43,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Checkout build-logic (from reusable repo)
+      - name: Checkout reusable repo (for init script)
         uses: actions/checkout@v4
         with:
           repository: Darryl-Cardoza/reusable-repo-android
           ref: main
-          path: build-logic
+          path: .reusable
 
       - name: Set up JDK (Temurin)
         uses: actions/setup-java@v4
