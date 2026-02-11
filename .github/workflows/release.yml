@@ -106,7 +106,7 @@ jobs:
   # 0) CI (your reusable CI)
   ci:
     name: Android CI (Reusable)
-    uses: ./.github/workflows/android-ci-reusable.yml
+    uses: ./.github/workflows/push.yml
     with:
       java_version: ${{ inputs.java_version }}
       build_variant: ${{ inputs.build_variant }}
