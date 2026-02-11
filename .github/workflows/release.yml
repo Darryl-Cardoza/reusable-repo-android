@@ -370,10 +370,14 @@ jobs:
   upload_to_release:
     name: Upload signed artifacts to GitHub Release
     if: ${{ inputs.deploy_to_playstore || inputs.deploy_to_esper }}
-    needs: [ci, create_release, sign_android]
+    needs: [ ci, create_release, sign_android ]
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download signed artifacts
         uses: actions/download-artifact@v4
         with:
@@ -398,3 +402,4 @@ jobs:
 
           # shellcheck disable=SC2086
           gh release upload "$TAG" $FILES --clobber
+  
