@@ -291,6 +291,17 @@ jobs:
           cp "${{ inputs.whats_new_file }}" "$RUNNER_TEMP/whatsnew/${LANG}/whatsnew"
           echo "✅ whatsNewDirectory prepared at: $RUNNER_TEMP/whatsnew"
 
+      - name: Verify signed AAB exists
+        run: |
+          set -euo pipefail
+          ls -la release/android/signed || true
+          AAB=$(find release/android/signed -name "*.aab" | head -n 1 || true)
+          if [ -z "$AAB" ]; then
+            echo "❌ No signed .aab found in release/android/signed"
+            exit 1
+          fi
+          echo "✅ Found AAB: $AAB"
+
       - name: Upload to Google Play Store (AAB)
         uses: r0adkll/upload-google-play@v1
         with:
