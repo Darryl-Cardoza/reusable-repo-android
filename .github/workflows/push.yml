@@ -294,8 +294,8 @@ jobs:
         run: ./gradlew assemble${{ env.BUILD_VARIANT }}
 
       # If you also build AAB in CI, uncomment:
-      # - name: Build AAB
-      #   run: ./gradlew bundle${{ env.BUILD_VARIANT }}
+      - name: Build AAB
+        run: ./gradlew bundle${{ env.BUILD_VARIANT }}
 
       - name: Upload APK/AAB outputs
         if: always()
