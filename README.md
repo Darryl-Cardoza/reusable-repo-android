@@ -344,7 +344,7 @@ Because it is:
 
 # 👨‍💻 Author
 
-Reusable **Android CI/CD Pipeline for GitHub Actions**
+**Rite Technologies - DevOps Competency**
 
 ---
 
