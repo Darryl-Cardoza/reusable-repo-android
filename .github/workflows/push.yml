@@ -54,6 +54,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+
   ci:
     name: Reusable CI Pipeline
     runs-on: ${{ inputs.runner }}
@@ -89,12 +90,42 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x ./gradlew
+      # --------------------------------------------------
+      # Install Gradle wrapper dynamically (if jar missing)
+      # --------------------------------------------------
 
-      # -----------------------------
+      - name: Install Gradle Wrapper from repo version
+        run: |
+          set -euo pipefail
+
+          WRAPPER_FILE="gradle/wrapper/gradle-wrapper.properties"
+
+          if [ ! -f "$WRAPPER_FILE" ]; then
+            echo "❌ gradle-wrapper.properties not found."
+            exit 1
+          fi
+
+          echo "Reading Gradle version from wrapper properties..."
+
+          DIST_URL=$(grep distributionUrl "$WRAPPER_FILE" | cut -d= -f2)
+          GRADLE_VERSION=$(echo "$DIST_URL" | sed -E 's/.*gradle-([0-9.]+)-.*/\1/')
+
+          echo "Detected Gradle version: $GRADLE_VERSION"
+
+          echo "Downloading Gradle $GRADLE_VERSION..."
+          curl -sLo gradle.zip https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip
+          unzip -q gradle.zip
+
+          echo "$PWD/gradle-${GRADLE_VERSION}/bin" >> $GITHUB_PATH
+
+          echo "Generating Gradle wrapper..."
+          gradle wrapper
+
+          chmod +x gradlew
+
+      # --------------------------------------------------
       # Static Analysis
-      # -----------------------------
+      # --------------------------------------------------
 
       - name: Static analysis (Detekt)
         if: ${{ inputs.run_static_analysis }}
@@ -106,17 +137,17 @@ jobs:
             echo "Detekt task not found -> skipping"
           fi
 
-      # -----------------------------
+      # --------------------------------------------------
       # Unit Tests
-      # -----------------------------
+      # --------------------------------------------------
 
       - name: Run Unit Tests
         if: ${{ inputs.run_tests }}
         run: ./gradlew test${{ env.BUILD_VARIANT }}UnitTest
 
-      # -----------------------------
+      # --------------------------------------------------
       # Coverage
-      # -----------------------------
+      # --------------------------------------------------
 
       - name: Generate Test Report (JaCoCo)
         if: ${{ inputs.run_tests && inputs.run_coverage }}
@@ -167,9 +198,9 @@ jobs:
             exit 1
           fi
 
-      # -----------------------------
+      # --------------------------------------------------
       # Build
-      # -----------------------------
+      # --------------------------------------------------
 
       - name: Build APK
         run: ./gradlew assemble${{ env.BUILD_VARIANT }}
@@ -177,9 +208,9 @@ jobs:
       - name: Build AAB
         run: ./gradlew bundle${{ env.BUILD_VARIANT }}
 
-      # -----------------------------
+      # --------------------------------------------------
       # Artifacts
-      # -----------------------------
+      # --------------------------------------------------
 
       - name: Upload APK/AAB outputs
         if: always()
@@ -189,3 +220,28 @@ jobs:
           path: |
             app/build/outputs/apk/
             app/build/outputs/bundle/
+
+      - name: Upload Test Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ env.BUILD_VARIANT }}
+          path: |
+            app/build/reports/tests/
+            app/build/test-results/
+
+      - name: Upload JaCoCo Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-reports-${{ env.BUILD_VARIANT }}
+          path: app/build/reports/jacoco/
+
+      - name: Upload Detekt Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: detekt-reports
+          path: |
+            app/build/reports/detekt/
+            build/reports/detekt/
