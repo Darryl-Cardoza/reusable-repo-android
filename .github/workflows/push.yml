@@ -20,6 +20,21 @@ on:
         type: string
         default: ubuntu-latest
 
+      run_tests:
+        required: false
+        type: boolean
+        default: true
+
+      run_coverage:
+        required: false
+        type: boolean
+        default: true
+
+      run_static_analysis:
+        required: false
+        type: boolean
+        default: true
+
     outputs:
       coverage_percent:
         description: "Computed JaCoCo LINE coverage percent"
@@ -58,7 +73,7 @@ jobs:
           ref: main
           path: .reusable
 
-      - name: Set up JDK (Temurin)
+      - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -70,14 +85,19 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/settings.gradle*', '**/gradle-wrapper.properties', '**/gradle.properties') }}
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*','**/settings.gradle*','**/gradle-wrapper.properties','**/gradle.properties') }}
           restore-keys: |
             ${{ runner.os }}-gradle-
 
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
 
-      - name: Static analysis (Detekt) if available
+      # -----------------------------
+      # Static Analysis
+      # -----------------------------
+
+      - name: Static analysis (Detekt)
+        if: ${{ inputs.run_static_analysis }}
         run: |
           if ./gradlew tasks --all | grep -q '^detekt\b'; then
             echo "Detekt task found -> running detekt"
@@ -86,16 +106,24 @@ jobs:
             echo "Detekt task not found -> skipping"
           fi
 
+      # -----------------------------
+      # Unit Tests
+      # -----------------------------
+
       - name: Run Unit Tests
+        if: ${{ inputs.run_tests }}
         run: ./gradlew test${{ env.BUILD_VARIANT }}UnitTest
 
+      # -----------------------------
+      # Coverage
+      # -----------------------------
+
       - name: Generate Test Report (JaCoCo)
+        if: ${{ inputs.run_tests && inputs.run_coverage }}
         run: |
           set -euo pipefail
 
           INIT_SCRIPT=".reusable/gradle/jacoco.init.gradle"
-
-          echo "Using init script: $INIT_SCRIPT"
 
           if ./gradlew -I "$INIT_SCRIPT" :app:tasks --all | grep -qE '(^|[[:space:]])jacocoTestReport\b'; then
             ./gradlew -I "$INIT_SCRIPT" \
@@ -106,12 +134,12 @@ jobs:
               --rerun-tasks --no-build-cache
           else
             echo ":app:jacocoTestReport NOT found."
-            ./gradlew -I "$INIT_SCRIPT" :app:tasks --all | grep -i jacoco || true
             exit 1
           fi
 
       - name: Check Coverage Threshold
         id: coverage
+        if: ${{ inputs.run_tests && inputs.run_coverage }}
         run: |
           set -euo pipefail
 
@@ -128,7 +156,6 @@ jobs:
           COVERED=$(echo "$LINE_COUNTER" | grep -oP 'covered="\K[0-9]+')
 
           TOTAL=$((MISSED + COVERED))
-
           PCT=$(awk -v c="$COVERED" -v t="$TOTAL" 'BEGIN { printf "%.2f", (c/t)*100 }')
 
           echo "coverage_percent=$PCT" >> "$GITHUB_OUTPUT"
@@ -140,11 +167,19 @@ jobs:
             exit 1
           fi
 
+      # -----------------------------
+      # Build
+      # -----------------------------
+
       - name: Build APK
         run: ./gradlew assemble${{ env.BUILD_VARIANT }}
 
       - name: Build AAB
         run: ./gradlew bundle${{ env.BUILD_VARIANT }}
+
+      # -----------------------------
+      # Artifacts
+      # -----------------------------
 
       - name: Upload APK/AAB outputs
         if: always()
@@ -154,28 +189,3 @@ jobs:
           path: |
             app/build/outputs/apk/
             app/build/outputs/bundle/
-
-      - name: Upload Test Reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-reports-${{ env.BUILD_VARIANT }}
-          path: |
-            app/build/reports/tests/
-            app/build/test-results/
-
-      - name: Upload JaCoCo Reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: jacoco-reports-${{ env.BUILD_VARIANT }}
-          path: app/build/reports/jacoco/
-
-      - name: Upload Detekt Reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: detekt-reports
-          path: |
-            app/build/reports/detekt/
-            build/reports/detekt/
