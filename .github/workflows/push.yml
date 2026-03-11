@@ -116,10 +116,9 @@ jobs:
           curl -sLo gradle.zip https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip
           unzip -q gradle.zip
 
-          echo "$PWD/gradle-${GRADLE_VERSION}/bin" >> $GITHUB_PATH
+          echo "Generating Gradle wrapper using Gradle $GRADLE_VERSION..."
 
-          echo "Generating Gradle wrapper..."
-          gradle wrapper
+          ./gradle-${GRADLE_VERSION}/bin/gradle wrapper
 
           chmod +x gradlew
 
