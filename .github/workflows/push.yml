@@ -35,6 +35,26 @@ on:
         type: boolean
         default: true
 
+      run_android_lint:
+        required: false
+        type: boolean
+        default: true
+
+      gradle_working_directory:
+        required: false
+        type: string
+        default: "."
+
+      lint_source_path:
+        required: false
+        type: string
+        default: ".github/config/lint.xml"
+
+      lint_target_path:
+        required: false
+        type: string
+        default: "lint.xml"
+
     outputs:
       coverage_percent:
         description: "Computed JaCoCo LINE coverage percent"
@@ -61,6 +81,11 @@ jobs:
 
     outputs:
       coverage_percent: ${{ steps.coverage.outputs.coverage_percent }}
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.gradle_working_directory }}
 
     steps:
 
@@ -121,6 +146,47 @@ jobs:
           ./gradle-${GRADLE_VERSION}/bin/gradle wrapper
 
           chmod +x gradlew
+
+      # --------------------------------------------------
+      # Android Lint (central lint.xml copied into project root)
+      # --------------------------------------------------
+
+      - name: Validate source lint config exists
+        if: ${{ inputs.run_android_lint }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "${{ github.workspace }}/${{ inputs.lint_source_path }}" ]; then
+            echo "❌ Missing source lint config: ${{ github.workspace }}/${{ inputs.lint_source_path }}"
+            exit 1
+          fi
+
+      - name: Copy lint config to Android project root
+        if: ${{ inputs.run_android_lint }}
+        run: |
+          set -euo pipefail
+
+          cp "${{ github.workspace }}/${{ inputs.lint_source_path }}" "${{ inputs.lint_target_path }}"
+          echo "Copied lint config to: $(pwd)/${{ inputs.lint_target_path }}"
+
+          if [ ! -f "${{ inputs.lint_target_path }}" ]; then
+            echo "❌ lint.xml copy failed"
+            exit 1
+          fi
+
+      - name: Run Android Lint
+        if: ${{ inputs.run_android_lint }}
+        run: |
+          set -euo pipefail
+
+          if ./gradlew tasks --all | grep -q "^lint${BUILD_VARIANT}\b"; then
+            ./gradlew "lint${BUILD_VARIANT}"
+          elif ./gradlew tasks --all | grep -q "^lint\b"; then
+            ./gradlew lint
+          else
+            echo "❌ No Android lint task found"
+            exit 1
+          fi
 
       # --------------------------------------------------
       # Static Analysis
@@ -244,3 +310,19 @@ jobs:
           path: |
             app/build/reports/detekt/
             build/reports/detekt/
+
+      - name: Upload Android Lint Reports
+        if: ${{ always() && inputs.run_android_lint }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-lint-reports-${{ env.BUILD_VARIANT }}
+          path: |
+            **/build/reports/lint-results-*.html
+            **/build/reports/lint-results-*.xml
+            **/build/intermediates/lint_intermediate_text_report/**
+          if-no-files-found: warn
+
+      - name: Cleanup generated lint.xml
+        if: ${{ always() && inputs.run_android_lint }}
+        run: |
+          rm -f "${{ inputs.lint_target_path }}"
