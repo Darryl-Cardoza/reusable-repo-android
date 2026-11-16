@@ -292,7 +292,7 @@ jobs:
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Spotless ratchet needs history to diff against the base ref.
           fetch-depth: ${{ inputs.formatting_ratchet_from != '' && '0' || '1' }}
@@ -405,7 +405,7 @@ jobs:
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Android build environment
         uses: Darryl-Cardoza/reusable-repo-android/.github/actions/setup-android@main
@@ -465,7 +465,7 @@ jobs:
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0   # gitleaks scans history, not just the worktree
 
@@ -664,7 +664,7 @@ jobs:
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Android build environment
         uses: Darryl-Cardoza/reusable-repo-android/.github/actions/setup-android@main
@@ -748,7 +748,7 @@ jobs:
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Android build environment
         uses: Darryl-Cardoza/reusable-repo-android/.github/actions/setup-android@main
@@ -915,7 +915,7 @@ jobs:
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Android build environment
         uses: Darryl-Cardoza/reusable-repo-android/.github/actions/setup-android@main
@@ -966,7 +966,7 @@ jobs:
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Android build environment
         uses: Darryl-Cardoza/reusable-repo-android/.github/actions/setup-android@main
@@ -1021,7 +1021,7 @@ jobs:
       # the "@main" note above the `jobs:` key for why this can't be made to
       # track a caller-pinned tag of this workflow.
       - name: Checkout pipeline scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: Darryl-Cardoza/reusable-repo-android
           ref: main

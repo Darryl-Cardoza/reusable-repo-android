@@ -295,7 +295,7 @@ jobs:
 
     steps:
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -379,7 +379,7 @@ jobs:
             echo "::warning::Play Store deploy skipped: PLAYSTORE_SERVICE_ACCOUNT secret or package_name input is empty."
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: ${{ steps.chk.outputs.ok == 'true' }}
 
       - name: Download signed artifacts
