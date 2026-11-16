@@ -874,7 +874,7 @@ jobs:
       - name: Comment coverage on PR
         if: ${{ always() && inputs.run_coverage && github.event_name == 'pull_request' }}
         continue-on-error: true
-        uses: madrapps/jacoco-report@v1.7.1
+        uses: madrapps/jacoco-report@v1.8.0
         with:
           paths: ${{ inputs.app_module }}/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml
           token: ${{ github.token }}
