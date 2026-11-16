@@ -192,7 +192,7 @@ jobs:
 
       - name: Download unsigned Android artifacts
         if: ${{ steps.chk.outputs.ok == 'true' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: android-build-outputs-${{ inputs.build_variant }}
           path: release/android/unsigned
@@ -301,14 +301,14 @@ jobs:
 
       - name: Download signed artifacts
         if: ${{ needs.sign_android.outputs.signed == 'true' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: android-signed
           path: release/android/final
 
       - name: Download unsigned artifacts
         if: ${{ needs.sign_android.outputs.signed != 'true' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: android-build-outputs-${{ inputs.build_variant }}
           path: release/android/unsigned
@@ -384,7 +384,7 @@ jobs:
 
       - name: Download signed artifacts
         if: ${{ steps.chk.outputs.ok == 'true' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: android-signed
           path: release/android/signed
@@ -439,7 +439,7 @@ jobs:
 
       - name: Download build outputs
         if: ${{ steps.chk.outputs.ok == 'true' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: android-build-outputs-${{ inputs.build_variant }}
           path: build-outputs
@@ -537,7 +537,7 @@ jobs:
 
       - name: Download signed artifacts
         if: ${{ steps.chk.outputs.ok == 'true' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: android-signed
           path: release/android/signed
