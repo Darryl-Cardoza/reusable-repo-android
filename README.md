@@ -6,11 +6,28 @@ A production-ready reusable **GitHub Actions CI/CD pipeline for Android applicat
 
 ## ✨ Features
 
-- Gradle build caching
-- Detekt static analysis (auto-detected)
-- Android unit tests
-- JaCoCo coverage reporting
-- Coverage threshold enforcement
+### CI — complete quality gate, built entirely from free tooling
+
+| Concern | Tool | Gate |
+|---|---|---|
+| **Security (SAST)** | Android Lint security checks, Semgrep OSS (`p/kotlin`, `p/java`, `p/secrets` + Android rules) | fails on ERROR |
+| **Secret scanning** | gitleaks (binary — no org licence needed) | fails on any leak |
+| **Dependency CVEs** | CycloneDX SBOM → Trivy | report-only by default |
+| **Dead code** | Detekt `Unused*` rules, Android Lint `UnusedResources`, `buildHealth`, Qodana JVM Community | report-only by default |
+| **Static typing** | `kotlinc` with `-Xjsr305=strict`, optional warnings-as-errors | fails on type error |
+| **Lint** | Detekt with a shared config — always runs, never skip-if-absent | fails on any issue |
+| **Formatting** | Spotless + ktlint, with optional ratchet for legacy repos | fails on diff |
+| **Tests** | JUnit unit tests | fails on any failure |
+| **Coverage** | JaCoCo, **line and branch** thresholds, per-file PR comment | fails below threshold |
+
+Every tool is injected through a **Gradle init script** from this repo, so a caller
+repository adopts the whole pipeline **without changing a single build file**.
+
+### Platform
+
+- Gradle build caching, per-job cache scoping
+- Non-destructive Gradle wrapper bootstrap (the caller's declared version always wins)
+- Parallel CI jobs with an aggregated GitHub job summary
 - APK & AAB build
 - Secure keystore signing
 - Google Play Store deployment
@@ -18,17 +35,41 @@ A production-ready reusable **GitHub Actions CI/CD pipeline for Android applicat
 - GitHub Release creation
 - Automatic semantic version conflict resolution
 - Optional **“What’s New”** release notes from file
-- CI coverage summary inside GitHub Actions
 
 ---
 
 # 📦 Repository Structure
 
 ```
-.github/workflows
-├── push.yml        # Reusable Android CI workflow
-└── release.yml     # Reusable Android CD workflow
+.github/
+├── workflows/
+│   ├── push.yml                  # Reusable Android CI workflow
+│   └── release.yml               # Reusable Android CD workflow
+├── actions/setup-android/        # Shared setup: pipeline checkout, JDK, cache, wrapper
+└── tool/
+    ├── detekt.yml                # Shared Detekt config (lint + unused-code rules)
+    ├── .editorconfig             # Shared ktlint formatting contract
+    ├── gitleaks.toml             # Secret-scanning rules + Android allowlists
+    ├── qodana.yaml               # Cross-module dead-code inspection profile
+    ├── semgrep/android-rules.yml # Android/Kotlin SAST rules
+    ├── sonar-project.properties  # Optional SonarQube Community template
+    └── scripts/                  # Report summarisers wired into the job summary
+
+gradle/
+├── jacoco.init.gradle            # Coverage injection
+├── detekt.init.gradle            # Lint injection
+├── spotless.init.gradle          # Formatting injection
+├── android-lint.init.gradle      # Lint severity/report policy
+├── dependency-analysis.init.gradle  # Unused-dependency injection
+├── cyclonedx.init.gradle         # SBOM injection
+└── kotlin-strict.init.gradle     # Compiler strictness
 ```
+
+`.github/infra/` (Dockerfile + Terraform) is **not wired into either workflow**. It's example
+scaffolding only — a reference build image and a reference secrets-provisioning template —
+kept for teams that want a starting point, not something the CI/CD pipeline itself runs.
+
+
 
 ---
 
@@ -38,34 +79,33 @@ Caller App Repository triggers reusable workflows.
 
 ### Reusable CI Workflow (`push.yml`)
 
+Five independent jobs run in parallel, then build and summary:
+
 ```
-Checkout repository
-      ↓
-Setup JDK
-      ↓
-Gradle dependency cache
-      ↓
-Run Detekt (if present)
-      ↓
-Run unit tests
-      ↓
-Generate JaCoCo coverage report
-      ↓
-Coverage threshold check
-      ↓
-Build APK/AAB
-      ↓
-Upload artifacts and reports
+                    ┌─ Lint & Format ──── Spotless/ktlint + Detekt
+                    │
+                    ├─ Android Lint ───── security checks + unused resources
+  Checkout          │
+  + setup-android ──┼─ Security ───────── gitleaks + Semgrep + SBOM/Trivy
+  (every job)       │
+                    ├─ Dead Code ──────── buildHealth (+ optional Qodana)
+                    │
+                    └─ Tests & Coverage ─ JUnit + JaCoCo line/branch gates
+                                                    ↓
+                                          Build APK + AAB
+                                                    ↓
+                                          CI Summary (job summary + artifacts)
 ```
+
+Only **Build** depends on **Tests** — everything else fans out, so a formatting
+failure and a coverage failure surface in the same run rather than one at a time.
 
 ### Reusable CD Workflow (`release.yml`)
 
 ```
-Run CI workflow
-        ↓
 Create GitHub Release
         ↓
-Download unsigned build artifacts
+Download unsigned build artifacts (from the caller's own CI job -- see below)
         ↓
 Sign APK/AAB
         ↓
@@ -76,30 +116,112 @@ Deploy to Esper (optional)
 Upload signed artifacts to GitHub Release
 ```
 
+This workflow does **not** run its own CI pass. It consumes the artifact the
+caller's own CI job already built earlier in the same workflow run — see
+"Consolidated CI+CD build" below for why, and what the caller needs to do.
+
+---
+
+## Consolidated CI+CD build
+
+Earlier versions of this pipeline had `release.yml` re-run the entire CI
+workflow itself (tests + build) before creating the release, on top of
+whatever CI pass the caller's own `push.yml` already ran to gate the push.
+For a release-tag push that meant the same source tree got compiled and
+tested twice back-to-back — once against the Debug variant (the caller's own
+CI job), once against Release (this workflow's nested one) — for no benefit,
+since the quality gates (lint, formatting, security, dead-code) don't depend
+on build variant and were already skipped on the second pass.
+
+`release.yml` no longer runs a nested CI job. Instead, the **caller** picks
+the build variant dynamically, once, based on the trigger:
+
+```yaml
+# caller's push.yml
+ci:
+  uses: your-org/android-reusable/.github/workflows/push.yml@main
+  with:
+    build_variant: ${{ (contains(github.ref_name, 'release') && 'Release') || 'Debug' }}
+    coverage_threshold: ${{ (contains(github.ref_name, 'release') && '40.00') || '30.00' }}
+    # ...
+
+cd:
+  uses: your-org/android-reusable/.github/workflows/release.yml@main
+  if: contains(github.ref_name, 'release')   # same condition as above
+  needs: [ci]
+  with:
+    build_variant: "Release"   # always matches what `ci` just built for this trigger
+    # ...
+```
+
+A plain push/PR still gets a fast Debug build + full quality suite. A
+release-tag push builds **Release** directly — once — and `cd` just signs
+and ships the artifact that same `ci` job already produced (reusable-workflow
+calls share one workflow run, so the artifact `ci` uploads is already visible
+to `cd`'s jobs via plain `actions/download-artifact`). No second compile,
+no second test run.
+
 ---
 
 # 🧪 Reusable CI Workflow (`push.yml`)
 
-Handles:
-
-- JDK setup
-- Gradle dependency caching
-- Static analysis using Detekt (if available)
-- Android unit tests
-- JaCoCo coverage generation
-- Coverage threshold validation
-- APK/AAB build
-- Artifact uploads
-
----
-
 ## Inputs
+
+### Required
 
 | Input | Description |
 |------|-------------|
 | `java_version` | Java version for Gradle |
 | `build_variant` | Android build variant (Debug / Release / StagingDebug) |
-| `coverage_threshold` | Minimum coverage percentage required |
+| `coverage_threshold` | Minimum LINE coverage percentage required |
+
+### Stage toggles
+
+| Input | Default | Description |
+|------|---------|-------------|
+| `runner` | `ubuntu-latest` | Runner label |
+| `run_tests` | `true` | Unit tests |
+| `run_coverage` | `true` | JaCoCo report + threshold gate |
+| `run_static_analysis` | `true` | Detekt |
+| `run_formatting` | `true` | Spotless + ktlint |
+| `run_android_lint` | `true` | Android Lint (security + unused resources) |
+| `run_security` | `true` | gitleaks + Semgrep |
+| `run_dependency_audit` | `true` | SBOM + Trivy + dependency submission |
+| `run_ui_tests` | `false` | Espresso/Compose `connectedAndroidTest` on an emulator (needs a KVM runner; `ubuntu-latest` has it) |
+| `ui_test_api_level` | `"30"` | Emulator API level for the UI tests |
+| `run_dead_code` | `true` | Unused-dependency analysis |
+| `run_deep_dead_code` | `false` | Qodana cross-module unused declarations (slow) |
+
+### Tuning
+
+| Input | Default | Description |
+|------|---------|-------------|
+| `app_module` | `"app"` | Gradle module that produces the APK/AAB and JaCoCo report |
+| `coverage_branch_threshold` | `"0"` | Minimum BRANCH coverage %. `0` disables the branch gate |
+| `formatting_ratchet_from` | `""` | Git ref — only check files changed since it |
+| `lint_check_all_warnings` | `false` | Enable lint checks that are off by default |
+| `kotlin_jsr305_strict` | `true` | Enforce Java `@Nullable`/`@NonNull` at compile time |
+| `kotlin_warnings_as_errors` | `false` | Promote Kotlin warnings to errors |
+
+### Gates
+
+Each gate turns its stage from *blocking* into *report-only*. Defaults are chosen
+so a repo adopting the pipeline is not blocked on day one by pre-existing debt.
+
+| Input | Default | Blocks the build? |
+|------|---------|-------------------|
+| `fail_on_lint` | `true` | Detekt findings |
+| `fail_on_formatting` | `true` | Formatting differences |
+| `fail_on_android_lint` | `true` | Lint errors + fatal security checks |
+| `fail_on_security` | `true` | Semgrep ERRORs and leaked secrets |
+| `fail_on_vulnerabilities` | `true` | HIGH/CRITICAL dependency CVEs (pass `false` while triaging) |
+| `fail_on_dead_code` | `false` | Unused code and unused dependencies |
+
+### Secrets
+
+| Secret | Required | Description |
+|------|----------|-------------|
+| `PIPELINE_TOKEN` | No | Only when **this** pipeline repo is private and the caller lives in a different repo. The default `GITHUB_TOKEN` is scoped to the caller and will 403 when checking out the init scripts. |
 
 ---
 
@@ -108,6 +230,114 @@ Handles:
 | Output | Description |
 |------|-------------|
 | `coverage_percent` | Computed JaCoCo LINE coverage percent |
+| `branch_coverage_percent` | Computed JaCoCo BRANCH coverage percent |
+
+---
+
+## Adoption path
+
+The pipeline is deliberately loud but not immediately blocking on the noisy
+checks. A sensible rollout:
+
+1. **Run it as-is.** Lint, formatting, tests and coverage gate from day one;
+   CVEs and dead code report only.
+2. **Triage the dead-code report.** Add suppressions for DI graphs, serializers
+   and Compose previews, then set `fail_on_dead_code: true`.
+3. **Triage the CVE report.** `fail_on_vulnerabilities` is on by default; pass
+   `false` while you upgrade or accept each HIGH/CRITICAL.
+4. **Clear the Kotlin warning backlog**, then set
+   `kotlin_warnings_as_errors: true`.
+5. **Add a branch-coverage floor** with `coverage_branch_threshold`.
+
+For a legacy codebase, `formatting_ratchet_from: origin/main` limits the
+formatting gate to changed files so the first PR is not a whole-repo reformat.
+
+The CI build artifact also carries `build/outputs/mapping/` and
+`build/generated/crashlytics/`, which `release.yml` uses for the Crashlytics
+mapping upload.
+
+Dependabot for Gradle must live in each app repo (this repo can't enable it for
+callers). Free on private repos:
+
+```yaml
+# app repo: .github/dependabot.yml
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: "/"
+    schedule: { interval: weekly }
+```
+
+To fix formatting locally:
+
+```bash
+./gradlew -I .pipeline/gradle/spotless.init.gradle spotlessApply
+```
+
+---
+
+## Dead code on Android modules
+
+Every other check in this pipeline is truly zero-touch: nothing in the caller
+repo needs to change. Dependency-analysis (DAGP, the "unused dependency" half
+of `run_dead_code`) is the one exception, and only for repos where **any**
+module applies `com.android.application`, `com.android.library`, or
+`com.android.dynamic-feature`.
+
+**Why:** DAGP is injected via a Gradle init script so callers don't have to
+touch their build files. For Android modules, DAGP needs to read AGP's own
+`AndroidComponentsExtension` API at runtime -- and an init script's plugin
+classpath is isolated from the classloader that resolves AGP for the
+caller's own `plugins {}` block. There's no reliable injection-only fix for
+that (it's a hard Gradle classloading boundary, not a config issue) -- see
+the comments in
+[`gradle/dependency-analysis.init.gradle`](gradle/dependency-analysis.init.gradle)
+for the full mechanics. The init script detects Android modules automatically
+and skips them with a log line rather than crashing.
+
+**This is whole-build, not per-module.** DAGP coordinates root and every
+analyzed subproject through one root-registered build service; every copy
+involved must come from the same classloader. That means a repo **cannot**
+mix "root + some subprojects injected via this init script" with "one
+Android module declares DAGP directly" -- doing so throws a
+`ClassCastException` the first time the two copies try to coordinate, and
+DAGP separately refuses outright to apply to any subproject if the root
+project doesn't have a matching application of its own. So once *any* module
+in a repo needs to declare DAGP directly, the **root project and every
+module you want covered** (Android or not) must all declare it directly, and
+the init script backs off from that repo's `dependencyAnalysis` entirely
+(also with a log line, not a crash).
+
+**The fix, for a repo with at least one Android module:** declare DAGP for
+real on the root project, and on every module you want covered -- pinned to
+the same version this pipeline injects (`DAGP_VERSION` in `push.yml`,
+currently `1.33.0`):
+
+```kotlin
+// root build.gradle.kts -- applied for real, NOT `apply false`. DAGP
+// requires a matching root application before any subproject can apply it.
+plugins {
+    id("com.autonomousapps.dependency-analysis") version "1.33.0"
+}
+```
+
+```kotlin
+// Every module you want covered, Android or not (app/build.gradle.kts,
+// hl7Core/build.gradle.kts, ...) -- no version needed, inherits root's.
+plugins {
+    id("com.autonomousapps.dependency-analysis")
+}
+```
+
+A module left out of this (root declares it, but the module itself doesn't)
+simply won't appear in the dead-code report -- no crash, just missing
+coverage; the init script's log line calls this out per module.
+
+No further wiring needed beyond that -- thresholds, severity
+(`DAGP_SEVERITY`) and the `fail_on_dead_code` gate are still driven entirely
+by this pipeline's `push.yml` inputs, same as every other check. When
+bumping `DAGP_VERSION` in the pipeline, bump the caller's pinned version to
+match.
 
 ---
 
@@ -115,28 +345,30 @@ Handles:
 
 The CI pipeline automatically:
 
-1. Generates a **JaCoCo XML report**
-2. Extracts **LINE coverage**
-3. Compares it against the configured threshold
+1. Generates a **JaCoCo XML report** (injected — the caller needs no JaCoCo setup)
+2. Extracts **LINE** and **BRANCH** coverage from the report-level counters
+3. Compares both against their configured thresholds
+4. On pull requests, comments per-file coverage on the changed lines
 
 Example:
 
 ```
-Threshold: 75%
-Actual Coverage: 78.43%
+Line coverage:   78.43% (threshold 75%)
+Branch coverage: 64.10% (threshold 60%)
 
 Result: PASSED
 ```
 
-If coverage is below the threshold, the pipeline **fails automatically**.
+If either figure is below its threshold, the pipeline **fails automatically**.
+The branch gate is off until `coverage_branch_threshold` is set above `0`.
 
 ---
 
 # 🚀 Reusable CD Workflow (`release.yml`)
 
-Handles:
+Handles (consumes the caller's own CI job's artifact -- see "Consolidated
+CI+CD build" above; does not build anything itself):
 
-- CI execution
 - GitHub Release creation
 - APK/AAB signing
 - Google Play Store deployment
@@ -163,6 +395,52 @@ Handles:
 | `esper_app_id` | Esper application ID |
 | `enable_whats_new` | Enable release notes |
 | `whats_new_file` | File containing release notes |
+| `android_build_tools_version` | Build-tools version used when signing (default `"34.0.0"`) |
+| `upload_crashlytics_mapping` | Upload the shipped build's R8 mapping to Crashlytics (default `false`) |
+| `firebase_app_id` | Firebase app id, needed for the mapping upload |
+| `playstore_promote_to` | Promote mode: target track (e.g. `closed`, `production`). Empty = normal release |
+| `playstore_promote_from` | Promote mode: source track (default `internal`) |
+| `playstore_user_fraction` | Promote mode: rollout fraction, `0 < f <= 1` (production only; default `0.1`) |
+
+### Crashlytics mapping
+
+The app owns the Crashlytics SDK, the `com.google.firebase.crashlytics` Gradle
+plugin and `google-services.json`. With `upload_crashlytics_mapping: true`,
+`release.yml` uploads the `mapping.txt` and mapping-id resource that CI already
+built (R8 output differs per rebuild, so the shipped build's own files are used).
+Skipped with a warning when `FIREBASE_SERVICE_ACCOUNT` or `firebase_app_id` is empty.
+
+### Staged rollout (internal → closed → production %)
+
+A normal run uploads to `playstore_track` (use `internal`). To promote, call
+`release.yml` with `playstore_promote_to`; nothing is built, signed or released.
+The person who starts the dispatch run is the approval step (free on private repos):
+
+```yaml
+# caller: .github/workflows/promote.yml
+on:
+  workflow_dispatch:
+    inputs:
+      to:       { description: "closed | production", required: true }
+      fraction: { description: "0.1 | 0.5 | 1.0", default: "0.1" }
+jobs:
+  promote:
+    uses: Darryl-Cardoza/reusable-repo-android/.github/workflows/release.yml@main
+    with:
+      version: "0.0.0"            # required, ignored when promoting
+      java_version: "17"
+      build_variant: Release
+      coverage_threshold: "0"
+      package_name: com.example.app
+      playstore_promote_from: internal
+      playstore_promote_to: ${{ inputs.to }}
+      playstore_user_fraction: ${{ inputs.fraction }}
+    secrets:
+      PLAYSTORE_SERVICE_ACCOUNT: ${{ secrets.PLAYSTORE_SERVICE_ACCOUNT }}
+```
+
+Raising the fraction of a release already on `production` (`from` = `to`) is
+untested against fastlane; try it on a non-production track first.
 
 ---
 
@@ -235,11 +513,39 @@ The same release notes are used for:
 
 ---
 
+## Firebase Crashlytics
+
+- `FIREBASE_SERVICE_ACCOUNT` — service-account JSON for the mapping upload
+
+---
+
+## Pipeline checkout (optional)
+
+- `PIPELINE_TOKEN` — forwarded to the nested CI run; same as the CI workflow's own
+  `PIPELINE_TOKEN` (only needed when this pipeline repo is private and the caller
+  lives elsewhere).
+
+---
+
 # 🧩 Example Caller Workflow Usage
 
+`call-android-release` needs `call-android-ci` to have already built the same
+`build_variant` it downloads (`Release` here) -- see "Consolidated CI+CD
+build" above for the full dynamic-variant pattern; this snippet fixes it to
+Release for brevity.
+
 ```yaml
+call-android-ci:
+  uses: your-org/android-reusable/.github/workflows/push.yml@main
+  with:
+    java_version: 17
+    build_variant: Release
+    coverage_threshold: "75.00"
+    # ...
+
 call-android-release:
   uses: your-org/android-reusable/.github/workflows/release.yml@main
+  needs: call-android-ci
 
   with:
     version: 1.2.0

@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Keeps this repo's own action pins current. Gradle dependencies are the
+  # caller app's concern: see the README for the snippet to add there.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

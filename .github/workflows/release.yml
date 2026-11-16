@@ -1,3 +1,12 @@
+# Reusable Android CD. Consumes the artifact the caller's CI built; never rebuilds.
+#
+# 1. sign_android: signs the APK and AAB when sign_build or a deploy is on.
+#    Missing keystore secrets skip signing with a warning, not a failure.
+# 2. create_release: always runs. Creates the GitHub Release with the signed
+#    files, or the unsigned ones if signing was skipped.
+# 3. deploy_playstore, deploy_esper: opt-in, signed builds only. Each is
+#    skipped with a warning when its credentials are missing.
+
 name: "Reusable Android CD (Release)"
 
 on:
@@ -23,6 +32,15 @@ on:
         required: false
         type: string
         default: ubuntu-latest
+
+      sign_build:
+        required: false
+        type: boolean
+        default: true
+        description: >-
+          Sign the APK/AAB before attaching them to the GitHub Release. Forced on
+          when deploying to Play Store/Esper. If the keystore secrets are missing,
+          signing is skipped with a warning (and deploys are skipped too).
 
       deploy_to_playstore:
         required: false
@@ -69,6 +87,49 @@ on:
         type: string
         default: ""
 
+      android_build_tools_version:
+        required: false
+        type: string
+        default: "34.0.0"
+        description: "Build-tools version used by sdkmanager/zipalign/apksigner when signing."
+
+      # ---- Crashlytics ----
+      upload_crashlytics_mapping:
+        required: false
+        type: boolean
+        default: false
+        description: >-
+          Upload the shipped build's R8 mapping to Firebase Crashlytics. Uses the
+          mapping CI already built, so it matches the binary users run. The app
+          must apply the Crashlytics Gradle plugin.
+
+      firebase_app_id:
+        required: false
+        type: string
+        default: ""
+        description: "Firebase app id, e.g. 1:1234567890:android:abc123."
+
+      # ---- staged rollout ----
+      playstore_promote_to:
+        required: false
+        type: string
+        default: ""
+        description: >-
+          Promote mode. When set (e.g. closed, production), no build is signed or
+          released: the existing Play release on playstore_promote_from is moved
+          to this track at playstore_user_fraction. Empty = normal release.
+
+      playstore_promote_from:
+        required: false
+        type: string
+        default: internal
+
+      playstore_user_fraction:
+        required: false
+        type: string
+        default: "0.1"
+        description: "Rollout fraction, 0 < f <= 1 (e.g. 0.1, 0.5, 1.0). Production only."
+
     secrets:
       ANDROID_KEYSTORE:
         required: false
@@ -82,19 +143,20 @@ on:
       PLAYSTORE_SERVICE_ACCOUNT:
         required: false
 
+      FIREBASE_SERVICE_ACCOUNT:
+        required: false
+
       ESPER_API_KEY:
         required: false
 
-    outputs:
-      coverage_percent:
-        description: "Computed JaCoCo LINE coverage percent from CI"
-        value: ${{ jobs.ci.outputs.coverage_percent }}
+      PIPELINE_TOKEN:
+        required: false
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: android-cd-${{ github.ref }}
+  group: android-cd-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: false
 
 defaults:
@@ -103,18 +165,129 @@ defaults:
 
 jobs:
 
-  ci:
-    name: Android CI (Reusable)
-    uses: ./.github/workflows/push.yml
-    with:
-      java_version: ${{ inputs.java_version }}
-      build_variant: ${{ inputs.build_variant }}
-      coverage_threshold: ${{ inputs.coverage_threshold }}
+  sign_android:
+    name: Sign Android
+    if: ${{ inputs.playstore_promote_to == '' && (inputs.sign_build || inputs.deploy_to_playstore || inputs.deploy_to_esper) }}
+    runs-on: ${{ inputs.runner }}
 
+    outputs:
+      signed: ${{ steps.chk.outputs.ok }}
+
+    steps:
+
+      - name: Check signing secrets
+        id: chk
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_PASSWORD" ] && [ -n "$KEY_ALIAS" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Signing skipped: one or more of ANDROID_KEYSTORE, KEYSTORE_PASSWORD, KEY_PASSWORD, KEY_ALIAS is not set. The release will carry unsigned artifacts and Play Store/Esper deploys will be skipped."
+          fi
+
+      - name: Download unsigned Android artifacts
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: android-build-outputs-${{ inputs.build_variant }}
+          path: release/android/unsigned
+
+      - name: Install Android SDK tools
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+
+      - name: Install Build Tools
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        env:
+          BUILD_TOOLS_VERSION: ${{ inputs.android_build_tools_version }}
+        run: |
+          set -euo pipefail
+          sdkmanager "build-tools;${BUILD_TOOLS_VERSION}" "platform-tools"
+          echo "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Decode Keystore
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/android
+          printf "%s" "$ANDROID_KEYSTORE" | base64 --decode > /tmp/android/upload-keystore.jks
+
+      - name: Sign APK
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        env:
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p release/android/signed
+
+          APKS=$(find release/android/unsigned -name "*.apk" || true)
+
+          for APK in $APKS; do
+            BASENAME=$(basename "$APK" .apk)
+            OUT="release/android/signed/${BASENAME}-signed.apk"
+
+            zipalign -f 4 "$APK" /tmp/aligned.apk
+
+            apksigner sign \
+              --ks /tmp/android/upload-keystore.jks \
+              --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass "pass:$KEYSTORE_PASSWORD" \
+              --key-pass "pass:$KEY_PASSWORD" \
+              --out "$OUT" \
+              /tmp/aligned.apk
+          done
+
+      - name: Sign AAB
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        env:
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p release/android/signed
+          AABS=$(find release/android/unsigned -name "*.aab" || true)
+
+          for AAB in $AABS; do
+            BASENAME=$(basename "$AAB" .aab)
+            OUT="release/android/signed/${BASENAME}-signed.aab"
+
+            cp "$AAB" "$OUT"
+
+            jarsigner \
+              -keystore /tmp/android/upload-keystore.jks \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
+              "$OUT" \
+              "$KEY_ALIAS"
+          done
+
+      - name: Upload signed artifacts
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-signed
+          path: release/android/signed/*
+
+
+  # Runs even when sign_android is skipped (unsigned fallback).
   create_release:
     name: Create GitHub Release
-    needs: ci
+    needs: sign_android
+    if: ${{ !cancelled() && !failure() && inputs.playstore_promote_to == '' }}
     runs-on: ${{ inputs.runner }}
+
+    permissions:
+      contents: write
 
     outputs:
       version: ${{ steps.version_check.outputs.version }}
@@ -126,11 +299,26 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download unsigned Android artifacts
+      - name: Download signed artifacts
+        if: ${{ needs.sign_android.outputs.signed == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: android-signed
+          path: release/android/final
+
+      - name: Download unsigned artifacts
+        if: ${{ needs.sign_android.outputs.signed != 'true' }}
         uses: actions/download-artifact@v4
         with:
           name: android-build-outputs-${{ inputs.build_variant }}
           path: release/android/unsigned
+
+      - name: Collect unsigned APK/AAB
+        if: ${{ needs.sign_android.outputs.signed != 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p release/android/final
+          find release/android/unsigned \( -name "*.apk" -o -name "*.aab" \) -exec cp {} release/android/final/ \;
 
       - name: Determine next GitHub version
         id: version_check
@@ -153,108 +341,56 @@ jobs:
             CURRENT_VERSION="$major.$minor.$patch"
           done
 
+          if [ "$CURRENT_VERSION" != "$BASE_VERSION" ]; then
+            echo "::warning::Requested version $BASE_VERSION already has a tag; releasing as $CURRENT_VERSION instead. The APK/AAB built by the ci job still carry whatever versionCode/versionName the app's own build.gradle produced -- they are NOT aware of this bump, so the GitHub Release tag and the version baked into the binary may not match."
+          fi
+
           echo "version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
         with:
           tag_name: ${{ steps.version_check.outputs.tag }}
           name: Release ${{ steps.version_check.outputs.tag }}
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: release/android/final/*
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-  sign_android:
-    name: Sign Android
-    if: ${{ inputs.deploy_to_playstore || inputs.deploy_to_esper }}
-    needs: create_release
-    runs-on: ${{ inputs.runner }}
-
-    steps:
-
-      - name: Download unsigned Android artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: android-build-outputs-${{ inputs.build_variant }}
-          path: release/android/unsigned
-
-      - name: Install Android SDK tools
-        uses: android-actions/setup-android@v3
-
-      - name: Install Build Tools
-        run: |
-          sdkmanager "build-tools;34.0.0" "platform-tools"
-          echo "$ANDROID_SDK_ROOT/build-tools/34.0.0" >> $GITHUB_PATH
-
-      - name: Decode Keystore
-        run: |
-          mkdir -p /tmp/android
-          printf "%s" "${{ secrets.ANDROID_KEYSTORE }}" | base64 --decode > /tmp/android/upload-keystore.jks
-
-      - name: Sign APK
-        run: |
-          mkdir -p release/android/signed
-
-          APKS=$(find release/android/unsigned -name "*.apk" || true)
-
-          for APK in $APKS; do
-            BASENAME=$(basename "$APK" .apk)
-            OUT="release/android/signed/${BASENAME}-signed.apk"
-
-            zipalign -f 4 "$APK" /tmp/aligned.apk
-
-            apksigner sign \
-              --ks /tmp/android/upload-keystore.jks \
-              --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
-              --ks-pass pass:"${{ secrets.KEYSTORE_PASSWORD }}" \
-              --key-pass pass:"${{ secrets.KEY_PASSWORD }}" \
-              --out "$OUT" \
-              /tmp/aligned.apk
-          done
-
-      - name: Sign AAB
-        run: |
-          AABS=$(find release/android/unsigned -name "*.aab" || true)
-
-          for AAB in $AABS; do
-            BASENAME=$(basename "$AAB" .aab)
-            OUT="release/android/signed/${BASENAME}-signed.aab"
-
-            cp "$AAB" "$OUT"
-
-            jarsigner \
-              -keystore /tmp/android/upload-keystore.jks \
-              -storepass "${{ secrets.KEYSTORE_PASSWORD }}" \
-              -keypass "${{ secrets.KEY_PASSWORD }}" \
-              "$OUT" \
-              "${{ secrets.KEY_ALIAS }}"
-          done
-
-      - name: Upload signed artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-signed
-          path: release/android/signed/*
 
   deploy_playstore:
     name: Deploy to Play Store
-    if: ${{ inputs.deploy_to_playstore }}
+    if: ${{ inputs.deploy_to_playstore && needs.sign_android.outputs.signed == 'true' }}
     needs: sign_android
     runs-on: ${{ inputs.runner }}
 
     steps:
 
+      - name: Check Play Store credentials
+        id: chk
+        env:
+          PLAYSTORE_SERVICE_ACCOUNT: ${{ secrets.PLAYSTORE_SERVICE_ACCOUNT }}
+          PACKAGE_NAME: ${{ inputs.package_name }}
+        run: |
+          if [ -n "$PLAYSTORE_SERVICE_ACCOUNT" ] && [ -n "$PACKAGE_NAME" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Play Store deploy skipped: PLAYSTORE_SERVICE_ACCOUNT secret or package_name input is empty."
+          fi
+
       - uses: actions/checkout@v4
+        if: ${{ steps.chk.outputs.ok == 'true' }}
 
       - name: Download signed artifacts
+        if: ${{ steps.chk.outputs.ok == 'true' }}
         uses: actions/download-artifact@v4
         with:
           name: android-signed
           path: release/android/signed
 
       - name: Prepare What's New (Optional)
-        if: ${{ inputs.enable_whats_new && inputs.whats_new_file != '' }}
+        if: ${{ steps.chk.outputs.ok == 'true' && inputs.enable_whats_new && inputs.whats_new_file != '' }}
         run: |
           LANG="en-US"
           mkdir -p "$RUNNER_TEMP/whatsnew/${LANG}"
@@ -267,7 +403,8 @@ jobs:
           fi
 
       - name: Upload to Play Store
-        uses: r0adkll/upload-google-play@v1
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5
         with:
           serviceAccountJsonPlainText: ${{ secrets.PLAYSTORE_SERVICE_ACCOUNT }}
           packageName: ${{ inputs.package_name }}
@@ -277,54 +414,155 @@ jobs:
           inAppUpdatePriority: 2
           whatsNewDirectory: ${{ inputs.enable_whats_new && inputs.whats_new_file != '' && format('{0}/whatsnew', runner.temp) || '' }}
 
-  deploy_esper:
-    name: Deploy to Esper
-    if: ${{ inputs.deploy_to_esper }}
-    needs: sign_android
+
+  # Uses the mapping from the same CI build that was signed and shipped. R8 output
+  # differs on every rebuild, so rebuilding here would upload a mismatched mapping.
+  upload_crashlytics_mapping:
+    name: Upload Crashlytics mapping
+    if: ${{ inputs.upload_crashlytics_mapping && inputs.playstore_promote_to == '' }}
     runs-on: ${{ inputs.runner }}
 
     steps:
 
+      - name: Check Firebase configuration
+        id: chk
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          FIREBASE_APP_ID: ${{ inputs.firebase_app_id }}
+        run: |
+          if [ -n "$FIREBASE_SERVICE_ACCOUNT" ] && [ -n "$FIREBASE_APP_ID" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Crashlytics mapping upload skipped: FIREBASE_SERVICE_ACCOUNT secret or firebase_app_id input is empty."
+          fi
+
+      - name: Download build outputs
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: android-build-outputs-${{ inputs.build_variant }}
+          path: build-outputs
+
+      - name: Upload mapping to Crashlytics
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          FIREBASE_APP_ID: ${{ inputs.firebase_app_id }}
+        run: |
+          set -euo pipefail
+          MAPPING=$(find build-outputs -name mapping.txt | head -n1)
+          RES=$(find build-outputs -name 'com_google_firebase_crashlytics_mappingfileid.xml' | head -n1)
+          if [ -z "$MAPPING" ] || [ -z "$RES" ]; then
+            echo "::error::mapping.txt or Crashlytics mapping-id resource missing from the build artifact. Is the Crashlytics Gradle plugin applied and minify enabled for this variant?"
+            exit 1
+          fi
+          printf "%s" "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/firebase-sa.json"
+          GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/firebase-sa.json" \
+            npx --yes firebase-tools@13 crashlytics:mappingfile:upload \
+              --app="$FIREBASE_APP_ID" --resource-file="$RES" "$MAPPING"
+          rm -f "$RUNNER_TEMP/firebase-sa.json"
+
+
+  # Promote mode only: moves an already-uploaded release between tracks / rollout
+  # fractions. The caller's workflow_dispatch run is the approval step.
+  # ponytail: same-track rollout raise (from == to) is untested against fastlane; verify on a non-prod track first.
+  promote_playstore:
+    name: Promote on Play Store
+    if: ${{ inputs.playstore_promote_to != '' }}
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+
+      - name: Validate inputs
+        env:
+          PLAYSTORE_SERVICE_ACCOUNT: ${{ secrets.PLAYSTORE_SERVICE_ACCOUNT }}
+          PACKAGE_NAME: ${{ inputs.package_name }}
+          FRACTION: ${{ inputs.playstore_user_fraction }}
+        run: |
+          set -euo pipefail
+          [ -n "$PLAYSTORE_SERVICE_ACCOUNT" ] || { echo "::error::PLAYSTORE_SERVICE_ACCOUNT secret is empty."; exit 1; }
+          [ -n "$PACKAGE_NAME" ] || { echo "::error::package_name input is empty."; exit 1; }
+          awk -v f="$FRACTION" 'BEGIN { exit !(f+0 > 0 && f+0 <= 1) }' \
+            || { echo "::error::playstore_user_fraction must be > 0 and <= 1 (got '$FRACTION')."; exit 1; }
+
+      - name: Install fastlane
+        run: gem install fastlane --no-document
+
+      - name: Promote release
+        env:
+          PLAYSTORE_SERVICE_ACCOUNT: ${{ secrets.PLAYSTORE_SERVICE_ACCOUNT }}
+          PACKAGE_NAME: ${{ inputs.package_name }}
+          FROM: ${{ inputs.playstore_promote_from }}
+          TO: ${{ inputs.playstore_promote_to }}
+          FRACTION: ${{ inputs.playstore_user_fraction }}
+        run: |
+          set -euo pipefail
+          printf "%s" "$PLAYSTORE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/play-sa.json"
+
+          # A rollout fraction only applies to the production track; other tracks go to 100%.
+          ROLLOUT=()
+          [ "$TO" = "production" ] && ROLLOUT=(--rollout "$FRACTION")
+
+          fastlane supply \
+            --json_key "$RUNNER_TEMP/play-sa.json" \
+            --package_name "$PACKAGE_NAME" \
+            --track "$FROM" --track_promote_to "$TO" "${ROLLOUT[@]}" \
+            --skip_upload_apk --skip_upload_aab --skip_upload_metadata \
+            --skip_upload_changelogs --skip_upload_images --skip_upload_screenshots
+          rm -f "$RUNNER_TEMP/play-sa.json"
+
+
+  deploy_esper:
+    name: Deploy to Esper
+    if: ${{ inputs.deploy_to_esper && needs.sign_android.outputs.signed == 'true' }}
+    needs: [sign_android, create_release]
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+
+      - name: Check Esper configuration
+        id: chk
+        env:
+          ESPER_API_KEY: ${{ secrets.ESPER_API_KEY }}
+          ESPER_ORG_ID: ${{ inputs.esper_org_id }}
+          ESPER_APP_ID: ${{ inputs.esper_app_id }}
+        run: |
+          if [ -n "$ESPER_API_KEY" ] && [ -n "$ESPER_ORG_ID" ] && [ -n "$ESPER_APP_ID" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Esper deploy skipped: ESPER_API_KEY secret, esper_org_id or esper_app_id is empty."
+          fi
+
       - name: Download signed artifacts
+        if: ${{ steps.chk.outputs.ok == 'true' }}
         uses: actions/download-artifact@v4
         with:
           name: android-signed
           path: release/android/signed
 
       - name: Upload to Esper
+        if: ${{ steps.chk.outputs.ok == 'true' }}
         env:
           ESPER_API_KEY: ${{ secrets.ESPER_API_KEY }}
           ESPER_ORG_ID: ${{ inputs.esper_org_id }}
           ESPER_APP_ID: ${{ inputs.esper_app_id }}
         run: |
-          APK=$(find release/android/signed -name "*.apk" | head -n 1)
+          set -euo pipefail
+          mapfile -d '' APKS < <(find release/android/signed -name "*.apk" -print0)
+
+          if [ "${#APKS[@]}" -eq 0 ]; then
+            echo "❌ No signed APK found to upload to Esper"
+            exit 1
+          fi
+          if [ "${#APKS[@]}" -gt 1 ]; then
+            echo "::warning::Multiple signed APKs found; only uploading the first one to Esper: ${APKS[0]}"
+          fi
+
+          APK="${APKS[0]}"
 
           curl -X POST "https://api.esper.io/v0/enterprise/${ESPER_ORG_ID}/apps/${ESPER_APP_ID}/versions/" \
             -H "Authorization: Bearer ${ESPER_API_KEY}" \
             -F "apk=@${APK}" \
             -F "releaseNotes=Release ${{ needs.create_release.outputs.tag }}"
-
-  upload_to_release:
-    name: Upload artifacts to GitHub Release
-    if: ${{ inputs.deploy_to_playstore || inputs.deploy_to_esper }}
-    needs: [create_release, sign_android]
-    runs-on: ${{ inputs.runner }}
-
-    steps:
-
-      - uses: actions/checkout@v4
-
-      - name: Download signed artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: android-signed
-          path: dist
-
-      - name: Upload assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ needs.create_release.outputs.tag }}"
-          FILES=$(find dist -name "*.apk" -o -name "*.aab")
-
-          gh release upload "$TAG" $FILES --clobber
